@@ -96,7 +96,7 @@ def plot_graph(
         ax.set_xlim([0, ax_lim])
         ax.set_ylim([ax_lim, 0])
     else:
-        ax.set_aspect("equal")
+        ax.set_aspect("auto")
     ax.view_init(rotation, 180)
     fig.tight_layout()
     return fig
@@ -1139,7 +1139,7 @@ def show_initial_hypotheses(
     )
     fig.colorbar(s)
     ax.set_xticks([]), ax.set_yticks([]), ax.set_zticks([])
-    ax.set_aspect("equal")
+    ax.set_aspect("auto")
     ax.view_init(rotation[0], rotation[1])
     possible_ax = ["x", "y", "z"]
     plt.title(f"Possible Rotations along {possible_ax[axis]} axis")
@@ -1226,7 +1226,7 @@ def plot_evidence_at_step(
             c=pose_colors[n],
         )
     ax.set_xticks([]), ax.set_yticks([]), ax.set_zticks([])
-    ax.set_aspect("equal")
+    ax.set_aspect("auto")
     plt.title("displacments \n+ pose feature")
     plt.suptitle(f"Step {step}", fontsize=20)
     if is_surface_sensor:
@@ -1320,7 +1320,7 @@ def plot_evidence_at_step(
             s=2,
             alpha=0.5,
         )
-        ax2.set_aspect("equal")
+        ax2.set_aspect("auto")
         # fig.colorbar(s)
         ax2.set_xticks([]), ax2.set_yticks([]), ax2.set_zticks([])
 
@@ -1801,7 +1801,7 @@ class PolicyPlot:
         self.plot_core_object()
         self.derive_policy_details()
 
-        self.ax.set_aspect("equal")
+        self.ax.set_aspect("auto")
         # self.ax.set_box_aspect((6, 6, 6), zoom=zoom)
         if view is not None:
             self.ax.view_init(view[0], view[1])
@@ -1821,7 +1821,7 @@ class PolicyPlot:
         )
 
     def visualize_plot(self, save_path=None):
-        self.ax.set_aspect("equal")
+        self.ax.set_aspect("auto")
 
         if save_path is not None:
             if not os.path.exists(save_path):
@@ -1903,7 +1903,7 @@ def plot_learned_graph(
         alpha=0.3,
     )
 
-    ax.set_aspect("equal")
+    ax.set_aspect("auto")
     if view is not None:
         ax.view_init(view[0], view[1])
 
@@ -2074,7 +2074,7 @@ def plot_graph_mismatch(
     )
 
     view = [45, -80]
-    ax.set_aspect("equal")
+    ax.set_aspect("auto")
     if view is not None:
         ax.view_init(view[0], view[1])
 
@@ -2163,7 +2163,7 @@ def plot_hotspots(
                 s=200,
             )
 
-    ax.set_aspect("equal")
+    ax.set_aspect("auto")
     if view is not None:
         ax.view_init(view[0], view[1])
 

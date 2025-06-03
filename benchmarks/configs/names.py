@@ -102,7 +102,9 @@ NAMES.extend(field.name for field in fields(UnsupervisedInferenceExperiments))
 @dataclass
 class MyExperiments:
     # Add your experiment names here
-    pass
+    surf_agent_2obj_train: dict
+    #  dist_agent_5lm_2obj_train: dict
+
 
 
 NAMES.extend(field.name for field in fields(MyExperiments))
