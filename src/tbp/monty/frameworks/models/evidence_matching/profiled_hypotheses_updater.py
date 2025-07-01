@@ -145,11 +145,6 @@ class ProfiledHypothesesUpdater(DefaultHypothesesUpdater):
 
         for input_channel in input_channels_to_use:
             start_channel = time.perf_counter()
-
-            # Get channel-specific data
-            channel_displacement = displacements[input_channel] if displacements else None
-            channel_features = features[input_channel]
-
             initialize_hyp_space = bool(input_channel not in mapper.channels)
             # Initialize a new hypothesis space using graph nodes
             if initialize_hyp_space:

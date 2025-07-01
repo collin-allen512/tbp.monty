@@ -106,6 +106,7 @@ default_evidence_lm_config = dict(
             # but reduces performance a bit
             max_nneighbors=10
         ),
+        enable_hypothesis_profiling=True,
     ),
 )
 
