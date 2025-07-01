@@ -621,6 +621,9 @@ class MontyExperiment:
             setattr(self, k, exp_state_dict[k])
 
     def close(self):
+        # Finalize hypothesis profiling if enabled
+        self._finalize_hypothesis_profiling()
+        
         if isinstance(self.dataset, EnvironmentDataset):
             self.dataset.close()
 
@@ -632,6 +635,17 @@ class MontyExperiment:
             logger.debug(f"Removing and closing python log handler: {handler}")
             logger.removeHandler(handler)
             handler.close()
+            
+    def _finalize_hypothesis_profiling(self):
+        """Finalize hypothesis profiling for all learning modules."""
+        try:
+            output_dir = getattr(self, 'output_dir', '.')
+            if hasattr(self.model, 'learning_modules'):
+                for lm in self.model.learning_modules:
+                    if hasattr(lm, 'finalize_profiling'):
+                        lm.finalize_profiling(output_dir)
+        except Exception as e:
+            logger.warning(f"Error finalizing hypothesis profiling: {e}")
 
     def __enter__(self) -> Self:
         """Context manager entry method.

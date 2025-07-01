@@ -144,6 +144,10 @@ class EvidenceGraphLM(GraphLM):
             updates to different objects are completely independent of each other. In
             general it is recommended to use this but it can be useful to turn it off
             for debugging purposes.
+        enable_hypothesis_profiling: Whether to enable detailed profiling of hypothesis
+            update operations. When enabled, uses ProfiledHypothesesUpdater to track
+            timing of computational bottlenecks. Profiling results are saved at
+            experiment end. Defaults to False.
     """
 
     def __init__(
@@ -167,6 +171,7 @@ class EvidenceGraphLM(GraphLM):
         max_nodes_per_graph=2000,
         num_model_voxels_per_dim=50,  # -> voxel size = 6mm3 (0.006)
         use_multithreading=True,
+        enable_hypothesis_profiling=False,
         gsg_class=EvidenceGoalStateGenerator,
         gsg_args=None,
         hypotheses_updater_class: type[HypothesesUpdater] = DefaultHypothesesUpdater,
@@ -208,6 +213,20 @@ class EvidenceGraphLM(GraphLM):
         self.max_graph_size = max_graph_size
         # --- Debugging Params ---
         self.use_multithreading = use_multithreading
+        self.enable_hypothesis_profiling = enable_hypothesis_profiling
+
+        # Switch to ProfiledHypothesesUpdater if profiling is enabled
+        if enable_hypothesis_profiling:
+            from tbp.monty.frameworks.models.evidence_matching.profiled_hypotheses_updater import (
+                ProfiledHypothesesUpdater,
+            )
+            if hypotheses_updater_class == DefaultHypothesesUpdater:
+                hypotheses_updater_class = ProfiledHypothesesUpdater
+                logger.info("Hypothesis profiling enabled - using ProfiledHypothesesUpdater")
+                # Disable multithreading for accurate profiling
+                if self.use_multithreading:
+                    logger.info("Disabling multithreading for accurate profiling")
+                    self.use_multithreading = False
 
         # TODO make sure we always extract pose features and remove this
         self.tolerances = add_pose_features_to_tolerances(tolerances)
@@ -1182,3 +1201,14 @@ class EvidenceGraphLM(GraphLM):
         stats["evidences"] = self.evidence
         stats["symmetry_evidence"] = self.symmetry_evidence
         return stats
+        
+    def finalize_profiling(self, output_dir="."):
+        """Finalize hypothesis profiling at the end of an experiment."""
+        if self.enable_hypothesis_profiling:
+            from tbp.monty.frameworks.models.evidence_matching.profiled_hypotheses_updater import (
+                ProfiledHypothesesUpdater,
+            )
+            if isinstance(self.hypotheses_updater, ProfiledHypothesesUpdater):
+                self.hypotheses_updater.finalize_profiling(output_dir)
+            else:
+                logger.warning("Profiling enabled but not using ProfiledHypothesesUpdater")
