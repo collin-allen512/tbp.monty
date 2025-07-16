@@ -226,7 +226,6 @@ class ProfiledHypothesesUpdater(DefaultHypothesesUpdater):
         import json
         import os
         from datetime import datetime
-        print("saving")
         # Get comprehensive summary
         summary = self.get_profiling_summary()
 
@@ -243,7 +242,6 @@ class ProfiledHypothesesUpdater(DefaultHypothesesUpdater):
             json.dump(summary, f, indent=2, default=str)
 
         logger.info(f"Saved hypothesis profiling results to {output_file}")
-        print(f"Saved hypothesis profiling results     to {output_file}")
 
         # Save example data if collected
         if self.saved_examples:
@@ -251,7 +249,6 @@ class ProfiledHypothesesUpdater(DefaultHypothesesUpdater):
             with open(example_file, "wb") as f:
                 pickle.dump(self.saved_examples, f)
             logger.info(f"Saved {len(self.saved_examples)} example updates to {example_file}")
-        print("DDDD")
         # Save computation traces if collected
         if self.save_computation_trace and hasattr(self.hypotheses_displacer, 'computation_traces'):
             trace_file = os.path.join(output_dir, self.computation_trace_path)
@@ -260,7 +257,6 @@ class ProfiledHypothesesUpdater(DefaultHypothesesUpdater):
                 pickle.dump(traces, f)
             logger.info(f"Saved {len(traces)} computation traces to {trace_file}")
 
-        print("D")
         return output_file
 
     def reset_profiling(self):

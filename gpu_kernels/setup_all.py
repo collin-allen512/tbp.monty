@@ -22,7 +22,7 @@ if cuda_available:
                     '-gencode', 'arch=compute_75,code=sm_75',  # RTX 2080
                     '-gencode', 'arch=compute_80,code=sm_80',  # A100
                     '-gencode', 'arch=compute_86,code=sm_86',  # RTX 3090
-                    '-gencode', 'arch=compute_89,code=sm_89',  # RTX 4070
+                    # '-gencode', 'arch=compute_89,code=sm_89',  # RTX 4070
                 ]
             }
         )
