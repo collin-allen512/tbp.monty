@@ -70,6 +70,8 @@ class ProfiledHypothesesUpdater(DefaultHypothesesUpdater):
         umbilical_num_poses: int = 8,
         save_example_data: bool = False,
         example_data_path: str = "hypothesis_update_examples.pkl",
+        save_computation_trace: bool = False,
+        computation_trace_path: str = "hypothesis_computation_trace.pkl",
     ):
         super().__init__(
             feature_weights=feature_weights,
@@ -105,6 +107,15 @@ class ProfiledHypothesesUpdater(DefaultHypothesesUpdater):
         self.save_example_data = save_example_data
         self.example_data_path = example_data_path
         self.saved_examples = []
+
+        # Computation trace for GPU proof of concept
+        self.save_computation_trace = save_computation_trace
+        self.computation_trace_path = computation_trace_path
+        self.computation_traces = []
+
+        # Enable computation tracing in displacer if requested
+        if self.save_computation_trace:
+            self.hypotheses_displacer.save_computation_trace = True
 
     def update_hypotheses(
         self,
@@ -215,7 +226,7 @@ class ProfiledHypothesesUpdater(DefaultHypothesesUpdater):
         import json
         import os
         from datetime import datetime
-
+        print("saving")
         # Get comprehensive summary
         summary = self.get_profiling_summary()
 
@@ -232,6 +243,7 @@ class ProfiledHypothesesUpdater(DefaultHypothesesUpdater):
             json.dump(summary, f, indent=2, default=str)
 
         logger.info(f"Saved hypothesis profiling results to {output_file}")
+        print(f"Saved hypothesis profiling results     to {output_file}")
 
         # Save example data if collected
         if self.saved_examples:
@@ -239,7 +251,16 @@ class ProfiledHypothesesUpdater(DefaultHypothesesUpdater):
             with open(example_file, "wb") as f:
                 pickle.dump(self.saved_examples, f)
             logger.info(f"Saved {len(self.saved_examples)} example updates to {example_file}")
+        print("DDDD")
+        # Save computation traces if collected
+        if self.save_computation_trace and hasattr(self.hypotheses_displacer, 'computation_traces'):
+            trace_file = os.path.join(output_dir, self.computation_trace_path)
+            traces = self.hypotheses_displacer.computation_traces
+            with open(trace_file, "wb") as f:
+                pickle.dump(traces, f)
+            logger.info(f"Saved {len(traces)} computation traces to {trace_file}")
 
+        print("D")
         return output_file
 
     def reset_profiling(self):
@@ -295,7 +316,7 @@ class ProfiledHypothesesUpdater(DefaultHypothesesUpdater):
 
             # Save data to file
             output_file = self.save_profiling_data(output_dir)
-
+            print("DD")
             print(f"\n🔍 Hypothesis profiling complete!")
             print(f"📊 Results saved to: {output_file}")
             if self.saved_examples:
@@ -303,3 +324,4 @@ class ProfiledHypothesesUpdater(DefaultHypothesesUpdater):
             print("")
         else:
             logger.info("No profiling data collected.")
+

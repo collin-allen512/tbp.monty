@@ -81,7 +81,7 @@ default_evidence_lm_config = dict(
         # evidence_threshold_config="all",
         # Use this to update all hypotheses with evidence > 80% of max evidence (faster)
         evidence_threshold_config="80%",
-        # use_multithreading=False,
+        use_multithreading=False,
         # NOTE: Currently not used when loading pretrained graphs.
         max_graph_size=0.3,  # 30cm
         num_model_voxels_per_dim=100,
@@ -101,12 +101,18 @@ default_evidence_lm_config = dict(
             desired_object_distance=0.03,  # Distance from the object to the
             # agent that is considered "close enough" to the object
         ),
+        # hypotheses_updater_args=dict(
+        #     # Using a smaller max_nneighbors (5 instead of 10) makes runtime faster,
+        #     # but reduces performance a bit
+        #     max_nneighbors=10
+        # ),
+        enable_hypothesis_profiling=True,
         hypotheses_updater_args=dict(
-            # Using a smaller max_nneighbors (5 instead of 10) makes runtime faster,
-            # but reduces performance a bit
+            save_example_data=True,
+            save_computation_trace=True,  # Saves all intermediate computations
             max_nneighbors=10
         ),
-        enable_hypothesis_profiling=True,
+        # save_computation_trace=True
     ),
 )
 

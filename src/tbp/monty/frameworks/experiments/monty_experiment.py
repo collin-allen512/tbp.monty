@@ -623,7 +623,6 @@ class MontyExperiment:
     def close(self):
         # Finalize hypothesis profiling if enabled
         self._finalize_hypothesis_profiling()
-        
         if isinstance(self.dataset, EnvironmentDataset):
             self.dataset.close()
 
@@ -635,7 +634,6 @@ class MontyExperiment:
             logger.debug(f"Removing and closing python log handler: {handler}")
             logger.removeHandler(handler)
             handler.close()
-            
     def _finalize_hypothesis_profiling(self):
         """Finalize hypothesis profiling for all learning modules."""
         try:
