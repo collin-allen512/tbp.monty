@@ -470,7 +470,6 @@ class ProfiledHypothesesDisplacer(DefaultHypothesesDisplacer):
         evidence_intermediates
     ):
         """Profiled version of pose evidence calculation with intermediate capture."""
-        print("HHHHHHHHHHEEEEEEEEEEEEEEEEEERRRRRRRRRRRRRRRRRRREEEEEEEEEEEE")
         start_total = time.perf_counter()
 
         evidences_shape = node_distance_weights.shape[:2]
