@@ -712,21 +712,25 @@ class MontyGPUTester:
         # Extract KNN data from traces
         all_graph_locs = []
         all_query_locs = []
+        all_expected_ids = []
         graph_offsets = [0]
         query_offsets = [0]
 
         for trace in batch_state.traces:
-            if ("evidence_intermediates" in trace and 
+            if ("evidence_intermediates" in trace and
                 "nearest_neighbor_search" in trace["evidence_intermediates"]):
                 data = trace["evidence_intermediates"]["nearest_neighbor_search"]
                 inputs = data["inputs"]
-                
+                outputs = data["outputs"]
+
                 # Get graph locations from the trace
                 graph_locs = inputs["graph_locations"]
                 query_locs = inputs["search_locations"]
+                expected_ids = outputs["nearest_node_ids"]
 
                 all_graph_locs.append(graph_locs)
                 all_query_locs.append(query_locs)
+                all_expected_ids.append(expected_ids)
                 graph_offsets.append(graph_offsets[-1] + len(graph_locs))
                 query_offsets.append(query_offsets[-1] + len(query_locs))
 
@@ -741,6 +745,7 @@ class MontyGPUTester:
         # Stack graph and query data
         stacked_graph = torch.from_numpy(np.concatenate(all_graph_locs)).float().to(self.device)
         stacked_queries = torch.from_numpy(np.concatenate(all_query_locs)).float().to(self.device)
+        stacked_expected = np.concatenate(all_expected_ids)
         graph_offsets_tensor = torch.tensor(graph_offsets[:-1], dtype=torch.int32, device=self.device)
         query_offsets_tensor = torch.tensor(query_offsets[:-1], dtype=torch.int32, device=self.device)
 
@@ -759,10 +764,15 @@ class MontyGPUTester:
             torch.cuda.synchronize()
         gpu_time = time.perf_counter() - start_time
 
+        # Validate results
+        result_cpu = result.cpu().numpy()
+        # KNN results need special handling - check if indices match
+        matches = np.sum(result_cpu == stacked_expected) / result_cpu.size
+
         return {
             "time": gpu_time,
-            "max_difference": 0.0,  # Would need expected results to validate
-            "success": True
+            "max_difference": 1.0 - matches,  # Use match rate as accuracy metric
+            "success": matches > 0.95  # 95% match rate threshold
         }
 
     def _test_stacked_custom_distance(self, batch_state: StackedBatchState) -> Dict[str, Any]:
@@ -772,16 +782,23 @@ class MontyGPUTester:
         all_node_locs = []
         all_query_locs = []
         all_pose_normals = []
+        all_expected_dists = []
+        all_expected_weights = []
+        all_max_curvatures = []
 
         for trace in batch_state.traces:
             if ("evidence_intermediates" in trace and
                 "distance_calculation" in trace["evidence_intermediates"]):
                 data = trace["evidence_intermediates"]["distance_calculation"]
                 inputs = data["inputs"]
+                outputs = data["outputs"]
 
                 all_node_locs.append(inputs["nearest_node_locs"])
                 all_query_locs.append(inputs["search_locations"])
                 all_pose_normals.append(inputs["pose_normals"])
+                all_expected_dists.append(outputs["custom_nearest_node_dists"])
+                all_expected_weights.append(outputs["node_distance_weights"])
+                all_max_curvatures.append(inputs["max_abs_curvature"])
 
         if not all_node_locs:
             return {
@@ -795,32 +812,72 @@ class MontyGPUTester:
         stacked_node_locs = torch.from_numpy(np.concatenate(all_node_locs)).float().to(self.device)
         stacked_query_locs = torch.from_numpy(np.concatenate(all_query_locs)).float().to(self.device)
         stacked_pose_normals = torch.from_numpy(np.concatenate(all_pose_normals)).float().to(self.device)
+        stacked_expected_dists = np.concatenate(all_expected_dists)
+
+        # Create trace offsets for kernel
+        trace_sizes = [len(locs) for locs in all_node_locs]
+        trace_offsets = np.cumsum([0] + trace_sizes[:-1])
+        trace_offsets_tensor = torch.tensor(trace_offsets, dtype=torch.int32, device=self.device)
+
+        # Create curvatures tensor
+        curvatures_tensor = torch.tensor(all_max_curvatures, dtype=torch.float32, device=self.device)
+
+        # Check if curvatures vary
+        curvatures_vary = len(set(all_max_curvatures)) > 1
+        if curvatures_vary:
+            print(f"Info: Using per-trace curvatures: {set(all_max_curvatures)}")
 
         start_time = time.perf_counter()
 
         if self.use_cuda_kernels and hasattr(self.cuda_kernels, 'custom_distance_stacked'):
+            # Use new stacked kernel with per-trace curvatures
             result = self.cuda_kernels.custom_distance_stacked(
-                stacked_node_locs, stacked_query_locs, stacked_pose_normals, 0.1
+                stacked_node_locs, stacked_query_locs, stacked_pose_normals,
+                curvatures_tensor, trace_offsets_tensor
             )
         elif self.use_cuda_kernels:
-            result = self.cuda_kernels.custom_distance(
-                stacked_node_locs, stacked_query_locs, stacked_pose_normals, 0.1
+            # Fallback to per-trace if stacked kernel not available
+            result = self._custom_distance_per_trace(
+                all_node_locs, all_query_locs, all_pose_normals, all_max_curvatures
             )
         else:
             # PyTorch fallback
-            result = self._custom_distance_pytorch(
-                stacked_node_locs, stacked_query_locs, stacked_pose_normals, 0.1
+            result = self._custom_distance_per_trace(
+                all_node_locs, all_query_locs, all_pose_normals, all_max_curvatures
             )
 
         if self.device.type == 'cuda':
             torch.cuda.synchronize()
         gpu_time = time.perf_counter() - start_time
 
+        # Validate results
+        result_cpu = result.cpu().numpy()
+        max_diff = np.max(np.abs(result_cpu - stacked_expected_dists))
+
         return {
             "time": gpu_time,
-            "max_difference": 0.0,  # Would validate against expected results
-            "success": True
+            "max_difference": max_diff,
+            "success": max_diff < 1e-5
         }
+
+    def _custom_distance_per_trace(self, all_node_locs, all_query_locs, all_pose_normals, all_max_curvatures):
+        """Process custom distance per-trace when max_curvatures differ."""
+        results = []
+
+        for i in range(len(all_node_locs)):
+            node_locs = torch.from_numpy(all_node_locs[i]).float().to(self.device)
+            query_locs = torch.from_numpy(all_query_locs[i]).float().to(self.device)
+            pose_normals = torch.from_numpy(all_pose_normals[i]).float().to(self.device)
+            max_curvature = all_max_curvatures[i] if i < len(all_max_curvatures) else 0.1
+
+            if self.use_cuda_kernels:
+                trace_result = self.cuda_kernels.custom_distance(node_locs, query_locs, pose_normals, max_curvature)
+            else:
+                trace_result = self._custom_distance_pytorch(node_locs, query_locs, pose_normals, max_curvature)
+
+            results.append(trace_result)
+
+        return torch.cat(results, dim=0)
 
     def _test_stacked_angle_calculation(self, batch_state: StackedBatchState) -> Dict[str, Any]:
         """Test angle calculation with stacked data."""
@@ -828,28 +885,35 @@ class MontyGPUTester:
         # Extract angle calculation data from traces
         all_node_vectors = []
         all_query_vectors = []
+        all_expected_angles = []
 
         for trace in batch_state.traces:
             if ("evidence_intermediates" in trace and
                 "pose_evidence_matrix" in trace["evidence_intermediates"]):
                 data = trace["evidence_intermediates"]["pose_evidence_matrix"]
-                
+
                 # Check if angle calculation data is available
-                if "angle_calculation_inputs" in data:
+                if "angle_calculation_inputs" in data and "angle_calculation_outputs" in data:
                     angle_inputs = data["angle_calculation_inputs"]
+                    angle_outputs = data["angle_calculation_outputs"]
                     all_node_vectors.append(angle_inputs["node_pose_vectors"])
                     all_query_vectors.append(angle_inputs["query_pose_vectors"])
-                elif "inputs" in data:
+                    all_expected_angles.append(angle_outputs["pn_angles"])
+                elif "inputs" in data and "intermediates" in data:
                     inputs = data["inputs"]
                     # Get pose vectors for angle calculation
                     node_features = inputs["node_features"]
                     query_features = inputs["query_features"]
-                    
+
                     node_pose_vectors = node_features["pose_vectors"][:, :, :3]  # PN vectors
                     query_pose_vectors = query_features["pose_vectors"][:, 0]  # Query PN vector
 
                     all_node_vectors.append(node_pose_vectors)
                     all_query_vectors.append(query_pose_vectors)
+
+                    # Get expected angles from intermediates
+                    if "pn_error" in data["intermediates"]:
+                        all_expected_angles.append(data["intermediates"]["pn_error"])
 
         if not all_node_vectors:
             return {
@@ -862,6 +926,7 @@ class MontyGPUTester:
         # Stack data
         stacked_node_vectors = torch.from_numpy(np.concatenate(all_node_vectors)).float().to(self.device)
         stacked_query_vectors = torch.from_numpy(np.concatenate(all_query_vectors)).float().to(self.device)
+        stacked_expected_angles = np.concatenate(all_expected_angles) if all_expected_angles else None
 
         start_time = time.perf_counter()
 
@@ -883,10 +948,16 @@ class MontyGPUTester:
             torch.cuda.synchronize()
         gpu_time = time.perf_counter() - start_time
 
+        # Validate results if expected values available
+        max_diff = 0.0
+        if stacked_expected_angles is not None:
+            result_cpu = result.cpu().numpy()
+            max_diff = np.max(np.abs(result_cpu - stacked_expected_angles))
+
         return {
             "time": gpu_time,
-            "max_difference": 0.0,  # Would validate against expected results
-            "success": True
+            "max_difference": max_diff,
+            "success": max_diff < 1e-5 if stacked_expected_angles is not None else True
         }
 
     def _test_stacked_pose_evidence(self, batch_state: StackedBatchState) -> Dict[str, Any]:
@@ -896,19 +967,42 @@ class MontyGPUTester:
         all_pn_angles = []
         all_cd1_angles = []
         all_use_cd = []
+        all_expected_evidence = []
+        all_pn_weights = []
+        all_cd1_weights = []
 
         for trace in batch_state.traces:
             if ("evidence_intermediates" in trace and
                 "pose_evidence_matrix" in trace["evidence_intermediates"]):
                 data = trace["evidence_intermediates"]["pose_evidence_matrix"]
-                
+
                 # Look for pn_error in intermediates (this is what gets saved)
                 if "intermediates" in data and "pn_error" in data["intermediates"]:
-                    all_pn_angles.append(data["intermediates"]["pn_error"])
+                    pn_angles = data["intermediates"]["pn_error"]
+                    all_pn_angles.append(pn_angles)
+                    
+                    # Ensure cd1_angles has the same shape as pn_angles
                     if "cd1_angle" in data["intermediates"]:
                         all_cd1_angles.append(data["intermediates"]["cd1_angle"])
+                    else:
+                        # Create zeros with same shape as pn_angles
+                        all_cd1_angles.append(np.zeros_like(pn_angles))
+                    
                     if "use_cd" in data["intermediates"]:
                         all_use_cd.append(data["intermediates"]["use_cd"])
+                    else:
+                        # Create zeros (False) with same shape as pn_angles  
+                        all_use_cd.append(np.zeros_like(pn_angles, dtype=bool))
+
+                    # Get weights from trace if available
+                    pn_w = data["intermediates"].get("pn_weight", 1.0)
+                    cd1_w = data["intermediates"].get("cd1_weight", 0.5)
+                    all_pn_weights.append(pn_w)
+                    all_cd1_weights.append(cd1_w)
+
+                    # Get expected output
+                    if "outputs" in data and "pose_evidence_weighted" in data["outputs"]:
+                        all_expected_evidence.append(data["outputs"]["pose_evidence_weighted"])
 
         if not all_pn_angles:
             return {
@@ -918,41 +1012,90 @@ class MontyGPUTester:
                 "note": "No pose evidence data found in traces"
             }
 
-        # Stack data
+        # Stack data - all arrays should now have the same number of elements
         stacked_pn_angles = torch.from_numpy(np.concatenate(all_pn_angles)).float().to(self.device)
-        stacked_cd1_angles = torch.from_numpy(np.concatenate(all_cd1_angles)).float().to(self.device) if all_cd1_angles else torch.zeros_like(stacked_pn_angles)
+        stacked_cd1_angles = torch.from_numpy(np.concatenate(all_cd1_angles)).float().to(self.device)
+        
         # Convert use_cd to int32 explicitly
-        if all_use_cd:
-            use_cd_array = np.concatenate(all_use_cd)
-            stacked_use_cd = torch.from_numpy(use_cd_array.astype(np.int32)).to(self.device)
-        else:
-            stacked_use_cd = torch.zeros_like(stacked_pn_angles, dtype=torch.int32)
+        use_cd_array = np.concatenate(all_use_cd)
+        stacked_use_cd = torch.from_numpy(use_cd_array.astype(np.int32)).to(self.device)
+
+        stacked_expected = np.concatenate(all_expected_evidence) if all_expected_evidence else None
+
+        # Create trace offsets for kernel
+        # We need cumulative counts of total elements (after flattening)
+        element_counts = []
+        for angles in all_pn_angles:
+            if len(angles.shape) > 1:
+                element_counts.append(angles.shape[0] * angles.shape[1])
+            else:
+                element_counts.append(len(angles))
+
+        # Create cumulative offsets
+        trace_offsets = np.cumsum([0] + element_counts)
+        trace_offsets_tensor = torch.tensor(trace_offsets[:-1], dtype=torch.int32, device=self.device)
+
+
+        # Create weight tensors
+        pn_weights_tensor = torch.tensor(all_pn_weights, dtype=torch.float32, device=self.device)
+        cd1_weights_tensor = torch.tensor(all_cd1_weights, dtype=torch.float32, device=self.device)
+
 
         start_time = time.perf_counter()
 
         if self.use_cuda_kernels and hasattr(self.cuda_kernels, 'pose_evidence_stacked'):
+            # Use new stacked kernel with per-trace weights
             result = self.cuda_kernels.pose_evidence_stacked(
-                stacked_pn_angles, stacked_cd1_angles, stacked_use_cd, 1.0, 0.5
+                stacked_pn_angles, stacked_cd1_angles, stacked_use_cd,
+                pn_weights_tensor, cd1_weights_tensor, trace_offsets_tensor
             )
         elif self.use_cuda_kernels:
-            result = self.cuda_kernels.pose_evidence(
-                stacked_pn_angles, stacked_cd1_angles, stacked_use_cd, 1.0, 0.5
+            # Fallback to per-trace if stacked kernel not available
+            result = self._pose_evidence_per_trace(
+                all_pn_angles, all_cd1_angles, all_use_cd, all_pn_weights, all_cd1_weights
             )
         else:
             # PyTorch fallback
-            result = self._pose_evidence_pytorch(
-                stacked_pn_angles, stacked_cd1_angles, stacked_use_cd, 1.0, 0.5
+            result = self._pose_evidence_per_trace(
+                all_pn_angles, all_cd1_angles, all_use_cd, all_pn_weights, all_cd1_weights
             )
 
         if self.device.type == 'cuda':
             torch.cuda.synchronize()
         gpu_time = time.perf_counter() - start_time
 
+        # Validate results if expected values available
+        max_diff = 0.0
+        if stacked_expected is not None:
+            result_cpu = result.cpu().numpy()
+            max_diff = np.max(np.abs(result_cpu - stacked_expected))
+
         return {
             "time": gpu_time,
-            "max_difference": 0.0,  # Would validate against expected results
-            "success": True
+            "max_difference": max_diff,
+            "success": max_diff < 1e-5 if stacked_expected is not None else True
         }
+
+    def _pose_evidence_per_trace(self, all_pn_angles, all_cd1_angles, all_use_cd, all_pn_weights, all_cd1_weights):
+        """Process pose evidence per-trace when weights differ."""
+        results = []
+
+        for i in range(len(all_pn_angles)):
+            pn_angles = torch.from_numpy(all_pn_angles[i]).float().to(self.device)
+            cd1_angles = torch.from_numpy(all_cd1_angles[i]).float().to(self.device) if i < len(all_cd1_angles) else torch.zeros_like(pn_angles)
+            use_cd = torch.from_numpy(all_use_cd[i].astype(np.int32)).to(self.device) if i < len(all_use_cd) else torch.zeros_like(pn_angles, dtype=torch.int32)
+
+            pn_w = all_pn_weights[i] if i < len(all_pn_weights) else 1.0
+            cd1_w = all_cd1_weights[i] if i < len(all_cd1_weights) else 0.5
+
+            if self.use_cuda_kernels:
+                trace_result = self.cuda_kernels.pose_evidence(pn_angles, cd1_angles, use_cd, pn_w, cd1_w)
+            else:
+                trace_result = self._pose_evidence_pytorch(pn_angles, cd1_angles, use_cd, pn_w, cd1_w)
+
+            results.append(trace_result)
+
+        return torch.cat(results, dim=0)
 
     def _test_stacked_evidence_aggregation(self, batch_state: StackedBatchState) -> Dict[str, Any]:
         """Test evidence aggregation with stacked data."""
@@ -1023,14 +1166,17 @@ class MontyGPUTester:
 
         # Extract final aggregation data from traces
         all_evidence_matrix = []
+        all_expected_evidence = []
 
         for trace in batch_state.traces:
             if ("evidence_intermediates" in trace and
-                "evidence_aggregation" in trace["evidence_intermediates"]):
-                data = trace["evidence_intermediates"]["evidence_aggregation"]
+                "final_aggregation" in trace["evidence_intermediates"]):
+                data = trace["evidence_intermediates"]["final_aggregation"]
                 inputs = data["inputs"]
+                outputs = data["outputs"]
 
                 all_evidence_matrix.append(inputs["radius_evidence"])
+                all_expected_evidence.append(outputs["location_evidence"])
 
         if not all_evidence_matrix:
             return {
@@ -1042,6 +1188,7 @@ class MontyGPUTester:
 
         # Stack data
         stacked_evidence_matrix = torch.from_numpy(np.concatenate(all_evidence_matrix)).float().to(self.device)
+        stacked_expected = np.concatenate(all_expected_evidence)
 
         start_time = time.perf_counter()
 
@@ -1057,10 +1204,14 @@ class MontyGPUTester:
             torch.cuda.synchronize()
         gpu_time = time.perf_counter() - start_time
 
+        # Validate results
+        result_cpu = result.cpu().numpy()
+        max_diff = np.max(np.abs(result_cpu - stacked_expected))
+
         return {
             "time": gpu_time,
-            "max_difference": 0.0,  # Would validate against expected results
-            "success": True
+            "max_difference": max_diff,
+            "success": max_diff < 1e-5
         }
 
     def _validate_stacked_results(self, batch_state: StackedBatchState, result: torch.Tensor,
@@ -1488,6 +1639,57 @@ class MontyGPUTester:
 
         return total_evidence
 
+    def test_pose_evidence_simple(self):
+        """Test pose evidence calculation with simple inputs."""
+        print("\n--- Testing Pose Evidence Calculation ---")
+
+        # Create simple test data
+        pn_angles = torch.tensor([[0.5, 1.0], [1.5, 2.0]], dtype=torch.float32, device=self.device)
+        cd1_angles = torch.tensor([[0.8, 1.2], [1.8, 2.2]], dtype=torch.float32, device=self.device)
+        use_cd = torch.tensor([[1, 0], [1, 1]], dtype=torch.int32, device=self.device)
+        pn_weight = 1.0
+        cd1_weight = 0.5
+
+        # Test with single weights
+        if self.use_cuda_kernels:
+            result_gpu = self.cuda_kernels.pose_evidence(pn_angles, cd1_angles, use_cd, pn_weight, cd1_weight)
+            print(f"GPU result:\n{result_gpu}")
+
+        result_pytorch = self._pose_evidence_pytorch(pn_angles, cd1_angles, use_cd, pn_weight, cd1_weight)
+        print(f"PyTorch result:\n{result_pytorch}")
+
+        # Test with per-trace weights
+        if self.use_cuda_kernels and hasattr(self.cuda_kernels, 'pose_evidence_stacked'):
+            pn_weights = torch.tensor([1.0, 1.0], dtype=torch.float32, device=self.device)
+            cd1_weights = torch.tensor([0.5, 0.0], dtype=torch.float32, device=self.device)  # Different weights
+            trace_offsets = torch.tensor([0, 2], dtype=torch.int32, device=self.device)
+
+            flat_pn = pn_angles.flatten()
+            flat_cd1 = cd1_angles.flatten()
+            flat_use_cd = use_cd.flatten()
+
+            result_stacked = self.cuda_kernels.pose_evidence_stacked(
+                flat_pn, flat_cd1, flat_use_cd, pn_weights, cd1_weights, trace_offsets
+            )
+            print(f"\nStacked GPU result (trace 0 has cd1_weight=0.5, trace 1 has cd1_weight=0):\n{result_stacked.view(2, 2)}")
+
+            # Manual calculation for verification
+            print("\nManual calculation:")
+            for i in range(2):
+                for j in range(2):
+                    pn_ev = -(np.sin(pn_angles[i,j].item() / 2.0) - 0.5)
+                    if i == 0 and cd1_weight > 0:  # First trace has cd1_weight
+                        if use_cd[i,j].item():
+                            cd1_err = np.pi/2 - abs(cd1_angles[i,j].item() - np.pi/2)
+                            cd1_ev = -(np.sin(cd1_err) - 0.5)
+                        else:
+                            cd1_ev = 0
+                            pn_ev *= 2
+                        total = pn_ev * 1.0 + cd1_ev * 0.5
+                    else:  # Second trace has no cd1_weight
+                        total = pn_ev * 1.0
+                    print(f"  [{i},{j}]: pn_angle={pn_angles[i,j].item():.3f}, use_cd={use_cd[i,j].item()}, evidence={total:.3f}")
+
 
 def test_single_function(tester: MontyGPUTester, function_name: str, test_func, traces: list) -> None:
     """Test a single function across traces."""
@@ -1639,6 +1841,9 @@ def main():
         else:
             print(f"Comparison failed: {comparison}")
 
+    elif args.function == "pose_evidence_test":
+        # Run simple pose evidence test
+        tester.test_pose_evidence_simple()
     elif args.function:
         # Test specific function
         test_single_function(tester, args.function, function_map[args.function], traces)
