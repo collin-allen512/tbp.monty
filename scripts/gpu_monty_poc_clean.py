@@ -384,36 +384,55 @@ class MontyOperations:
         if monty_cuda is None:
             raise RuntimeError("CUDA kernels not available")
 
-
+        # query_poses = query_poses.contiguous()
+        # node_poses = node_poses.contiguous()
         # The pose_evidence_stacked kernel expects angles, not raw poses
         # We need to calculate angles first
         query_normals = query_poses[:, 0]  # (N, 3)
         node_normals = node_poses[:, :, :3]  # (N, K, 3)
 
-        # Calculate pn_angles using PyTorch (could be optimized with angle kernel later)
-        dot_products = torch.einsum("ijk,ik->ij", node_normals, query_normals)
-        dot_products = torch.clamp(dot_products, -1, 1)
-        pn_angles = torch.acos(dot_products)
+        # print(f" shape {.shape}")
+        # print(f"query_normals contiguous: {query_normals.is_contiguous()}")
+        # print(f"node_normals contiguous: {node_normals.is_contiguous()}")
+        query_normals = query_normals.contiguous()
+        node_normals = node_normals.contiguous()
+        # print(f"query_normals contiguous: {query_normals.is_contiguous()}")
+        # print(f"node_normals contiguous: {node_normals.is_contiguous()}")
+
+        # print(f" query_normals shape {query_normals.shape}")
+        # print(f"node_normals shape {node_normals.shape}")
+        pn_angles = monty_cuda.angle_calculation(node_normals, query_normals)
+
+        # dot_products = torch.einsum("ijk,ik->ij", node_normals, query_normals)
+        # dot_products = torch.clamp(dot_products, -1, 1)
+        # pn_angles_ = torch.acos(dot_products)
 
         # For simplicity, create dummy cd1_angles and use_cd (could be enhanced later)
-        cd1_angles = torch.zeros_like(pn_angles)
-        use_cd = torch.zeros_like(pn_angles, dtype=torch.int32)
+        # cd1_angles = torch.zeros_like(pn_angles)
+        cd1_angles = monty_cuda.angle_calculation(node_poses[:, :, 3:6].contiguous(), query_poses[:, 1].contiguous())
 
+        # use_cd = torch
+        # use_cd = torch.zeros_like(pn_angles, dtype=torch.int32)
+        # print(weights[0])
+        # use_cd = weights[0].expand(pn_angles.shape).to(torch.int32)
+        use_cd = torch.ones(pn_angles.shape, device=self.device).to(torch.int32)
+        # print(use_cd.shape)
         # Create trace offsets and weight tensors
-        trace_offsets = torch.tensor([0], dtype=torch.int32, device=self.device)
-        pn_weights = torch.tensor([weights[0]], dtype=torch.float32, device=self.device)
-        cd1_weights = torch.tensor([weights[1] if len(weights) > 1 else 0.0], dtype=torch.float32, device=self.device)
+        pose_offsets = torch.tensor([0], dtype=torch.int32, device=self.device).contiguous()
+        pn_weights = torch.tensor([weights[0]], dtype=torch.float32, device=self.device).expand(pn_angles.shape).contiguous()
+        cd1_weights = torch.tensor([weights[1]], dtype=torch.float32, device=self.device).expand(pn_angles.shape).contiguous()
 
         start_time = time.perf_counter()
         # Use stacked CUDA kernel for pose evidence calculation
         pose_evidence = monty_cuda.pose_evidence_stacked(
-            pn_angles, cd1_angles, use_cd, pn_weights, cd1_weights, trace_offsets
+            pn_angles, cd1_angles, use_cd, pn_weights, cd1_weights, pose_offsets
         )
 
         if self.device.type == "cuda":
             torch.cuda.synchronize()
         gpu_time = time.perf_counter() - start_time
 
+        # return cd1_angles, 0
         return pose_evidence, gpu_time
 
     def pose_evidence_cpu(self, query_poses: np.ndarray,
@@ -423,24 +442,81 @@ class MontyOperations:
 
         # Exact implementation from Monty
         # Calculate angles between pose vectors
-        query_normals = query_poses[:, 0]  # Primary normal
-        node_normals = node_poses[:, :, :3]  # Primary normals
+        # print(f"query poses {query_poses.shape}")
+        # print(f"node_normals {node_poses.shape}")
+        query_normals = query_poses[:, 0]
+        node_normals = node_poses[:, :, :3]
+
+        pn_weights = np.array([weights[0]])
+        cd1_weights = np.array([weights[1]])
+
+        # print(f" query_normals shape {query_normals.shape}")
+        # print(f"node_normals shape {node_normals.shape}")
+        # query_normals = torch.from_numpy(query_poses[:, 0]).float().to(torch.device('cpu'))
+        # node_normals = torch.from_numpy(node_poses[:, :, :3]).float().to(torch.device('cpu'))
 
         # Compute dot products and angles
         start_time = time.perf_counter()
-        dot_products = np.sum(
-            query_normals[:, np.newaxis] * node_normals, axis=2
-        )
-        dot_products = np.clip(dot_products, -1, 1)
-        angles = np.arccos(np.abs(dot_products))
+        # dot_products = np.sum(
+        #     query_normals[:, np.newaxis] * node_normals, axis=2
+        # )
+        # dot_products = np.clip(dot_products, -1, 1)
+        # angles = np.arccos(np.abs(dot_products))
+        # dot_products = torch.einsum("ijk,ik->ij", node_normals, query_normals)
+        # dot_products = torch.clamp(dot_products, -1, 1)
+        # pn_angles = torch.acos(dot_products)
+        dot_product = np.einsum("ijk,ik->ij", node_normals, query_normals)
+        pn_angles = np.arccos(np.clip(dot_product, -1, 1))
 
         # Convert to evidence
-        pn_evidence = -(np.sin(angles / 2) - 0.5)
-        pose_evidence = pn_evidence * weights[0]
+        pn_evidence = -(np.sin(pn_angles / 2) - 0.5)
+        # print(f"pn_evidence {pn_evidence.shape}")
+        # For simplicity, create dummy cd1_angles and use_cd (could be enhanced later)
+        # cd1_angle = get_angles_for_all_hypotheses(
+        #     node_features["pose_vectors"][:, :, 3:6],
+        #     query_features["pose_vectors"][:, 1],
+        # )
+        dot_product = np.einsum("ijk,ik->ij", node_poses[:, :, 3:6], query_poses[:, 1])
+        cd1_angles = np.arccos(np.clip(dot_product, -1, 1))
+        # print(f"cd1_angles {cd1_angles.shape}")
 
+        # cd1_angles = torch.zeros_like(pn_angles)
+        # use_cd = np.ones(pn_angles.shape, dtype=bool)
+        # print(f"use_cd {use_cd.shape}")
+        # Create trace offsets and weight tensors
+        # print(weights)
+        # print(weights[0])
+        # print([weights[0]])
+
+
+        # print(f"pn_weights {pn_weights.shape}")
+        # print(f"cd1_weights {cd1_weights.shape}")
+
+        cd1_error = np.pi / 2 - np.abs(cd1_angles - np.pi / 2)
+        # print(f"cd1_error {cd1_error.shape}")
+        # We then apply the same operations as on pn error to get cd1_evidence
+        # in range [-0.5, 0.5]
+        # if cd1_weights == 0:
+        #     cd1_weights = np.array([0])
+        #     # Only calculate curv dir angle if sensed curv dirs are meaningful
+        #     cd1_evidence = np.zeros(pn_evidence.shape)
+        # else:
+        cd1_evidence = -(np.sin(cd1_error) - 0.5)
+            # print(f"cd1_evidence {cd1_evidence.shape}")
+            # nodes where pc1==pc2 receive no cd evidence but twice the pn evidence
+            # -> overall evidence can be in range [-1, 1]
+            # cd1_evidence = cd1_evidence * use_cd
+            # print(f"cd1_evidence {cd1_evidence.shape}")
+            # pn_evidence[np.logical_not(use_cd)] *= 2
+            # print(f"pn_evidence {pn_evidence.shape}")
+
+        # pose_evidence = pn_evidence * weights[0]
+        pose_evidence_weighted = pn_evidence * pn_weights + cd1_evidence * cd1_weights
+        # print(pose_evidence_weighted.shape)
         cpu_time = time.perf_counter() - start_time
 
-        return pose_evidence, cpu_time
+        # return cd1_angles, cpu_time
+        return pose_evidence_weighted, cpu_time
 
     # =================================================================
     # 5. FINAL AGGREGATION OPERATIONS
@@ -578,7 +654,8 @@ class MontyOperations:
                                 pn_angles: torch.Tensor,
                                 cd1_angles: torch.Tensor,
                                 use_cd: torch.Tensor,
-                                weights: torch.Tensor) -> Tuple[torch.Tensor, float]:
+                                weights: torch.Tensor,
+                                poses_offsets: torch.Tensor) -> Tuple[torch.Tensor, float]:
         """Batched GPU pose evidence - single kernel call for all traces."""
         if monty_cuda is None:
             raise RuntimeError("CUDA kernels not available")
@@ -587,18 +664,19 @@ class MontyOperations:
         if not stacked:
             return None, 0.0
 
-        start_time = time.perf_counter()
 
         # Create weight tensors for all traces
-        pn_weights = torch.full((stacked["num_traces"],), weights[0],
-                               dtype=torch.float32, device=self.device)
-        cd1_weights = torch.full((stacked["num_traces"],), weights[1] if len(weights) > 1 else 0.0,
-                                dtype=torch.float32, device=self.device)
-        trace_offsets = stacked["hyp_offsets"]
-
+        # pn_weights = torch.full((stacked["num_traces"],), weights[0],
+                            #    dtype=torch.float32, device=self.device)
+        # cd1_weights = torch.full((stacked["num_traces"],), weights[1],
+                                # dtype=torch.float32, device=self.device)
+        pn_weights = torch.tensor([weights[0]], dtype=torch.float32, device=self.device).expand(pn_angles.shape).contiguous()
+        cd1_weights = torch.tensor([weights[1]], dtype=torch.float32, device=self.device).expand(pn_angles.shape).contiguous()
+        # trace_offsets = stacked["hyp_offsets"]
         # Single stacked kernel call for all traces
+        start_time = time.perf_counter()
         pose_evidence = monty_cuda.pose_evidence_stacked(
-            pn_angles, cd1_angles, use_cd, pn_weights, cd1_weights, trace_offsets
+            pn_angles.contiguous(), cd1_angles.contiguous(), use_cd.contiguous(), pn_weights.contiguous(), cd1_weights.contiguous(), poses_offsets.contiguous()
         )
 
         if self.device.type == "cuda":
@@ -1227,7 +1305,8 @@ def process_pose_evidence_all_approaches(unified_data: UnifiedStepData,
     # Get pose data from traces (use evidence_intermediates when available)
     query_poses_list = []
     node_poses_list = []
-
+    poses_offsets = [0]
+    poses_fully_defined_list = []
     for trace in unified_data.step_traces:
         if ("evidence_intermediates" in trace and
             "pose_evidence_matrix" in trace["evidence_intermediates"]):
@@ -1237,6 +1316,8 @@ def process_pose_evidence_all_approaches(unified_data: UnifiedStepData,
                 "node_features" in pose_data["inputs"]):
                 query_poses_list.append(pose_data["inputs"]["query_features"]["pose_vectors"])
                 node_poses_list.append(pose_data["inputs"]["node_features"]["pose_vectors"])
+                poses_offsets.append(poses_offsets[-1] + len(query_poses_list[-1]))
+                poses_fully_defined_list.append(pose_data["inputs"]["query_features"]["pose_fully_defined"])
 
     if not query_poses_list:
         print("    No pose evidence data available")
@@ -1250,8 +1331,11 @@ def process_pose_evidence_all_approaches(unified_data: UnifiedStepData,
 
     weights_cpu = np.array([1.0, 0.5])  # Default weights
 
+    all_poses_cpu_per_trace = []
+    all_poses_gpu_per_trace = []
     for query_poses_cpu, node_poses_cpu in zip(query_poses_list, node_poses_list):
         # CPU version
+        # print(pose_fully_defined_cpu)
         pose_evidence_cpu, cpu_time = operations.pose_evidence_cpu(
             query_poses_cpu, node_poses_cpu, weights_cpu
         )
@@ -1266,43 +1350,55 @@ def process_pose_evidence_all_approaches(unified_data: UnifiedStepData,
             query_poses_gpu, node_poses_gpu, weights_gpu
         )
         total_gpu_per_trace_time += gpu_time
-
+        all_poses_cpu_per_trace.append(pose_evidence_cpu)
+        all_poses_gpu_per_trace.append(pose_evidence_gpu)
+        # print(pose_evidence_cpu)
+        # print(pose_evidence_gpu)
+        # exit()
         # Verify results
-        gpu_np = pose_evidence_gpu.cpu().numpy()
-        trace_diff = np.max(np.abs(pose_evidence_cpu - gpu_np))
-        max_diff = max(max_diff, trace_diff)
+        # gpu_np = pose_evidence_gpu.cpu().numpy()
+        # trace_diff = np.max(np.abs(pose_evidence_cpu - gpu_np))
+        # max_diff = max(max_diff, trace_diff)
 
     # GPU Batched processing - single kernel call for all traces
     if query_poses_list:
         # Collect all pose data for batched processing
-        all_query_poses = []
-        all_node_poses = []
+        # all_query_poses = []
+        # all_node_poses = []
 
-        for query_poses_cpu, node_poses_cpu in zip(query_poses_list, node_poses_list):
-            all_query_poses.append(torch.from_numpy(query_poses_cpu.astype(np.float32)).to(operations.device))
-            all_node_poses.append(torch.from_numpy(node_poses_cpu.astype(np.float32)).to(operations.device))
+        # for query_poses_cpu, node_poses_cpu in zip(query_poses_list, node_poses_list):
+        #     all_query_poses.append(torch.from_numpy(query_poses_cpu.astype(np.float32)).to(operations.device))
+        #     all_node_poses.append(torch.from_numpy(node_poses_cpu.astype(np.float32)).to(operations.device))
 
         # Combine all poses for batched processing
-        combined_query_poses = torch.cat(all_query_poses, dim=0)
-        combined_node_poses = torch.cat(all_node_poses, dim=0)
+        combined_query_poses = torch.cat([torch.from_numpy(q.astype(np.float32)) for q in query_poses_list], dim=0).to(operations.device)
+        combined_node_poses = torch.cat([torch.from_numpy(q.astype(np.float32)) for q in node_poses_list], dim=0).to(operations.device)
 
         # Calculate angles for batched processing
         query_normals = combined_query_poses[:, 0]  # (N, 3)
         node_normals = combined_node_poses[:, :, :3]  # (N, K, 3)
 
         # Calculate pn_angles using PyTorch
-        dot_products = torch.einsum("ijk,ik->ij", node_normals, query_normals)
-        dot_products = torch.clamp(dot_products, -1, 1)
-        pn_angles = torch.acos(dot_products)
+        # dot_products = torch.einsum("ijk,ik->ij", node_normals, query_normals)
+        # dot_products = torch.clamp(dot_products, -1, 1)
+        # pn_angles = torch.acos(dot_products)
+
+        start_time = time.perf_counter()
+        pn_angles = monty_cuda.angle_calculation(node_normals.contiguous(), query_normals.contiguous())
+        cd1_angles = monty_cuda.angle_calculation(combined_node_poses[:, :, 3:6].contiguous(), combined_query_poses[:, 1].contiguous())
+        gpu_angle_time = time.perf_counter() - start_time
 
         # Create dummy cd1_angles and use_cd for now
-        cd1_angles = torch.zeros_like(pn_angles)
-        use_cd = torch.zeros_like(pn_angles, dtype=torch.int32)
+        # cd1_angles = torch.zeros_like(pn_angles)
+        use_cd = torch.ones(pn_angles.shape, dtype=torch.int32)
 
         weights_gpu = torch.from_numpy(weights_cpu.astype(np.float32)).to(operations.device)
+        # poses_offsets_tensor = torch.from_numpy(poses_offsets.astype(np.int32)).to(operations.device)
+        poses_offsets_tensor = torch.tensor(poses_offsets, dtype=torch.int32, device=operations.device)
         batched_pose_evidence, total_gpu_batched_time = operations.pose_evidence_gpu_batched(
-            unified_data, pn_angles, cd1_angles, use_cd, weights_gpu
+            unified_data, pn_angles, cd1_angles, use_cd, weights_gpu, poses_offsets_tensor
         )
+        total_gpu_batched_time += gpu_angle_time
     else:
         total_gpu_batched_time = 0
 
@@ -1311,36 +1407,57 @@ def process_pose_evidence_all_approaches(unified_data: UnifiedStepData,
     unified_data.gpu_per_trace_times["pose_evidence"] = total_gpu_per_trace_time
     unified_data.gpu_batched_times["pose_evidence"] = total_gpu_batched_time
 
+
+    # Verify results
+    max_diff = 0
+    max_batched_diff = 0
+    for i in range(len(all_poses_cpu_per_trace)):
+        cpu_result = all_poses_cpu_per_trace[i]
+        gpu_single_trace_result = all_poses_gpu_per_trace[i]
+        gpu_batched_result = batched_pose_evidence[poses_offsets[i]:poses_offsets[i+1]]
+        gpu_single_trace_result_np = gpu_single_trace_result.cpu().numpy()
+        gpu_batched_result_np = gpu_batched_result.cpu().numpy()
+        trace_diff = np.max(np.abs(cpu_result - gpu_single_trace_result_np))
+        # print(cpu_result.shape)
+        # print(gpu_batched_result_np.shape)
+        # print(cpu_result)
+        # print(gpu_batched_result_np)
+        batched_trace_diff = np.max(np.abs(cpu_result - gpu_batched_result_np))
+        max_diff = max(max_diff, trace_diff)
+        max_batched_diff = max(max_batched_diff, batched_trace_diff)
+        # print(max_batched_diff)
+        # exit()
+
     # Verify batched GPU results against CPU as well
-    batched_max_diff = 0
-    if total_gpu_batched_time > 0 and 'batched_pose_evidence' in locals():
-        # Split batched results back into per-trace format for comparison
-        batched_evidence_cpu = batched_pose_evidence.cpu().numpy()
+    # batched_max_diff = 0
+    # if total_gpu_batched_time > 0 and 'batched_pose_evidence' in locals():
+    #     # Split batched results back into per-trace format for comparison
+    #     batched_evidence_cpu = batched_pose_evidence.cpu().numpy()
 
-        # Use trace offsets to split results correctly
-        start_idx = 0
+    #     # Use trace offsets to split results correctly
+    #     start_idx = 0
 
-        for i, (query_poses_cpu, node_poses_cpu) in enumerate(zip(query_poses_list, node_poses_list)):
-            # Get expected output from trace
-            trace = unified_data.step_traces[i] if i < len(unified_data.step_traces) else unified_data.step_traces[0]
-            if ("evidence_intermediates" in trace and
-                "pose_evidence_matrix" in trace["evidence_intermediates"]):
-                expected_evidence = trace["evidence_intermediates"]["pose_evidence_matrix"]["outputs"]["pose_evidence_weighted"]
-                num_elements = expected_evidence.size
+    #     for i, (query_poses_cpu, node_poses_cpu) in enumerate(zip(query_poses_list, node_poses_list)):
+    #         # Get expected output from trace
+    #         trace = unified_data.step_traces[i] if i < len(unified_data.step_traces) else unified_data.step_traces[0]
+    #         if ("evidence_intermediates" in trace and
+    #             "pose_evidence_matrix" in trace["evidence_intermediates"]):
+    #             expected_evidence = trace["evidence_intermediates"]["pose_evidence_matrix"]["outputs"]["pose_evidence_weighted"]
+    #             num_elements = expected_evidence.size
 
-                # Extract this trace's results from batched output
-                end_idx = start_idx + num_elements
-                trace_results = batched_evidence_cpu[start_idx:end_idx].reshape(expected_evidence.shape)
+    #             # Extract this trace's results from batched output
+    #             end_idx = start_idx + num_elements
+    #             trace_results = batched_evidence_cpu[start_idx:end_idx].reshape(expected_evidence.shape)
 
-                # Compare with expected
-                trace_diff = np.max(np.abs(trace_results - expected_evidence))
-                batched_max_diff = max(batched_max_diff, trace_diff)
+    #             # Compare with expected
+    #             trace_diff = np.max(np.abs(trace_results - expected_evidence))
+    #             batched_max_diff = max(batched_max_diff, trace_diff)
 
-                start_idx = end_idx
+    #             start_idx = end_idx
 
     unified_data.verification_results["pose_evidence"] = {
         "per_trace_max_diff": max_diff,
-        "batched_max_diff": batched_max_diff,
+        "batched_max_diff": max_batched_diff,
         "per_trace_passed": max_diff < 1e-4,
         "batched_passed": total_gpu_batched_time > 0,  # Pass if batched ran without error
         "passed": max_diff < 1e-4 and total_gpu_batched_time > 0
@@ -1353,7 +1470,7 @@ def process_pose_evidence_all_approaches(unified_data: UnifiedStepData,
         per_trace_speedup = total_cpu_time / total_gpu_per_trace_time if total_gpu_per_trace_time > 0 else 0
         batched_speedup = total_cpu_time / total_gpu_batched_time if total_gpu_batched_time > 0 else 0
         print(f"    Per-Trace Speedup: {per_trace_speedup:.2f}x, Batched Speedup: {batched_speedup:.2f}x")
-    print(f"    Per-trace max diff: {max_diff:.2e}, Batched max diff: {batched_max_diff:.2e}")
+    print(f"    Per-trace max diff: {max_diff:.2e}, Batched max diff: {max_batched_diff:.2e}")
 
     return True
 

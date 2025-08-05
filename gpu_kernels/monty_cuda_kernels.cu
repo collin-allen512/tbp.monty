@@ -786,35 +786,35 @@ __global__ void displacement_batch_kernel(
     const scalar_t* __restrict__ locations,    // (B*N, 3)
     scalar_t* __restrict__ output,            // (B*N, 3)
     int B, int N) {
-    
+
     int batch_idx = blockIdx.y;
     int hyp_idx = blockIdx.x * blockDim.x + threadIdx.x;
-    
+
     if (batch_idx >= B || hyp_idx >= N) return;
-    
+
     int global_idx = batch_idx * N + hyp_idx;
     int disp_base = batch_idx * 3;
-    
+
     __shared__ scalar_t s_disp[3];
     if (threadIdx.x < 3) {
         s_disp[threadIdx.x] = displacement[disp_base + threadIdx.x];
     }
     __syncthreads();
-    
+
     scalar_t rotated_disp[3] = {scalar_t(0), scalar_t(0), scalar_t(0)};
-    
+
     rotated_disp[0] = poses[global_idx * 9 + 0] * s_disp[0] +
                       poses[global_idx * 9 + 1] * s_disp[1] +
                       poses[global_idx * 9 + 2] * s_disp[2];
-    
+
     rotated_disp[1] = poses[global_idx * 9 + 3] * s_disp[0] +
                       poses[global_idx * 9 + 4] * s_disp[1] +
                       poses[global_idx * 9 + 5] * s_disp[2];
-    
+
     rotated_disp[2] = poses[global_idx * 9 + 6] * s_disp[0] +
                       poses[global_idx * 9 + 7] * s_disp[1] +
                       poses[global_idx * 9 + 8] * s_disp[2];
-    
+
     output[global_idx * 3 + 0] = locations[global_idx * 3 + 0] + rotated_disp[0];
     output[global_idx * 3 + 1] = locations[global_idx * 3 + 1] + rotated_disp[1];
     output[global_idx * 3 + 2] = locations[global_idx * 3 + 2] + rotated_disp[2];
@@ -833,22 +833,22 @@ __global__ void evidence_aggregation_batch_kernel(
     scalar_t past_weight,
     scalar_t present_weight,
     int total_evidence) {
-    
+
     int global_idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (global_idx >= total_evidence) return;
-    
+
     // Find which batch this evidence belongs to
     int batch_idx = 0;
     while (batch_idx < 1000 && batch_offsets[batch_idx + 1] <= global_idx) {
         batch_idx++;
     }
-    
+
     int local_idx = global_idx - batch_offsets[batch_idx];
     int update_start = update_offsets[batch_idx];
     int update_end = update_offsets[batch_idx + 1];
-    
+
     scalar_t update_value = min_update;
-    
+
     // Check if this hypothesis has an update
     for (int i = update_start; i < update_end; i++) {
         if (test_indices[i] == local_idx) {
@@ -856,7 +856,7 @@ __global__ void evidence_aggregation_batch_kernel(
             break;
         }
     }
-    
+
     output_evidence[global_idx] = old_evidence[global_idx] * past_weight +
                                  update_value * present_weight;
 }
@@ -870,31 +870,31 @@ __global__ void knn_search_batch_kernel(
     const int* __restrict__ query_offsets,        // (B+1,) - cumulative query sizes
     int64_t* __restrict__ nearest_indices,        // (B*N_query, K)
     int total_queries, int K) {
-    
+
     int global_query_idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (global_query_idx >= total_queries) return;
-    
+
     // Find which batch this query belongs to
     int batch_idx = 0;
     while (batch_idx < 1000 && query_offsets[batch_idx + 1] <= global_query_idx) {
         batch_idx++;
     }
-    
+
     int local_query_idx = global_query_idx - query_offsets[batch_idx];
     int graph_start = graph_offsets[batch_idx];
     int graph_end = graph_offsets[batch_idx + 1];
     int graph_size = graph_end - graph_start;
-    
+
     scalar_t query_loc[3];
     for (int i = 0; i < 3; i++) {
         query_loc[i] = query_locations[global_query_idx * 3 + i];
     }
-    
+
     // Use same KNN logic as original, but only search within this batch's graph
     int safe_K = min(K, graph_size);
     scalar_t best_distances[64];
     int64_t best_indices[64];
-    
+
     // Initialize with first K points from this batch's graph
     int init_count = min(safe_K, graph_size);
     for (int k = 0; k < init_count; k++) {
@@ -907,7 +907,7 @@ __global__ void knn_search_batch_kernel(
         best_distances[k] = dist_sq;
         best_indices[k] = k;  // Store local index within batch
     }
-    
+
     // Sort initial set
     for (int i = 1; i < init_count; i++) {
         scalar_t key_dist = best_distances[i];
@@ -921,7 +921,7 @@ __global__ void knn_search_batch_kernel(
         best_distances[j + 1] = key_dist;
         best_indices[j + 1] = key_idx;
     }
-    
+
     // Process remaining points in this batch's graph
     for (int local_node_idx = init_count; local_node_idx < graph_size; local_node_idx++) {
         int node_idx = graph_start + local_node_idx;
@@ -930,7 +930,7 @@ __global__ void knn_search_batch_kernel(
             scalar_t diff = graph_locations[node_idx * 3 + i] - query_loc[i];
             dist_sq += diff * diff;
         }
-        
+
         if (dist_sq < best_distances[safe_K - 1]) {
             int pos = safe_K - 1;
             while (pos > 0 && best_distances[pos - 1] > dist_sq) {
@@ -942,7 +942,7 @@ __global__ void knn_search_batch_kernel(
             best_indices[pos] = local_node_idx;
         }
     }
-    
+
     // Copy results to output
     for (int k = 0; k < safe_K; k++) {
         nearest_indices[global_query_idx * K + k] = best_indices[k];
@@ -957,20 +957,20 @@ torch::Tensor displacement_batch(
     torch::Tensor poses,        // (B, N, 3, 3)
     torch::Tensor displacement, // (B, 3)
     torch::Tensor locations) {  // (B, N, 3)
-    
+
     const int B = poses.size(0);
     const int N = poses.size(1);
-    
+
     // Reshape to contiguous memory layout
     auto poses_flat = poses.view({B * N, 3, 3});
     auto locations_flat = locations.view({B * N, 3});
     auto output = torch::empty({B * N, 3}, locations.options());
-    
+
     // Use 2D grid: (hyp_blocks, batches)
     const int threads = 256;
     const dim3 grid((N + threads - 1) / threads, B);
     const dim3 block(threads);
-    
+
     AT_DISPATCH_FLOATING_TYPES(poses.scalar_type(), "displacement_batch", ([&] {
         displacement_batch_kernel<scalar_t><<<grid, block>>>(
             poses_flat.data_ptr<scalar_t>(),
@@ -980,7 +980,7 @@ torch::Tensor displacement_batch(
             B, N
         );
     }));
-    
+
     return output.view({B, N, 3});
 }
 
@@ -988,28 +988,28 @@ torch::Tensor knn_search_batch(
     torch::Tensor graph_locations, // (B, N_graph, 3)
     torch::Tensor query_locations, // (B, N_query, 3)
     int k_neighbors) {
-    
+
     const int B = graph_locations.size(0);
     const int N_graph = graph_locations.size(1);
     const int N_query = query_locations.size(1);
     const int total_queries = B * N_query;
-    
+
     // Flatten for contiguous memory access
     auto graph_flat = graph_locations.view({B * N_graph, 3});
     auto query_flat = query_locations.view({B * N_query, 3});
-    
+
     // Create offset arrays
-    auto graph_offsets = torch::arange(0, (B + 1) * N_graph, N_graph, 
+    auto graph_offsets = torch::arange(0, (B + 1) * N_graph, N_graph,
                                       torch::TensorOptions().dtype(torch::kInt32).device(graph_locations.device()));
     auto query_offsets = torch::arange(0, (B + 1) * N_query, N_query,
                                       torch::TensorOptions().dtype(torch::kInt32).device(query_locations.device()));
-    
-    auto indices = torch::empty({total_queries, k_neighbors}, 
+
+    auto indices = torch::empty({total_queries, k_neighbors},
                                torch::TensorOptions().dtype(torch::kLong).device(query_locations.device()));
-    
+
     const int threads = 256;
     const int blocks = (total_queries + threads - 1) / threads;
-    
+
     AT_DISPATCH_FLOATING_TYPES(query_locations.scalar_type(), "knn_search_batch", ([&] {
         knn_search_batch_kernel<scalar_t><<<blocks, threads>>>(
             graph_flat.data_ptr<scalar_t>(),
@@ -1020,7 +1020,7 @@ torch::Tensor knn_search_batch(
             total_queries, k_neighbors
         );
     }));
-    
+
     return indices.view({B, N_query, k_neighbors});
 }
 
@@ -1033,6 +1033,7 @@ template<typename scalar_t>
 __global__ void displacement_per_hyp_kernel(
     const scalar_t* __restrict__ poses,
     const scalar_t* __restrict__ displacements,
+    // const scalar_t* __restrict__ indices,
     const scalar_t* __restrict__ locations,
     scalar_t* __restrict__ output,
     int N) {
@@ -1069,18 +1070,19 @@ torch::Tensor displacement_stacked(
     torch::Tensor poses,           // (total_hyp, 3, 3)
     torch::Tensor displacements,   // (total_hyp, 3)
     torch::Tensor locations) {     // (total_hyp, 3)
-    
+
     const int N = poses.size(0);
     auto output = torch::empty({N, 3}, poses.options());
-    
+
     if (poses.device().is_cuda()) {
         const int threads = 256;
         const int blocks = (N + threads - 1) / threads;
-        
+
         AT_DISPATCH_FLOATING_TYPES(poses.scalar_type(), "displacement_per_hyp_cuda", ([&] {
             displacement_per_hyp_kernel<scalar_t><<<blocks, threads>>>(
                 poses.data_ptr<scalar_t>(),
                 displacements.data_ptr<scalar_t>(),
+                // indices.data_ptr<scalar_t>(),
                 locations.data_ptr<scalar_t>(),
                 output.data_ptr<scalar_t>(),
                 N
@@ -1091,7 +1093,7 @@ torch::Tensor displacement_stacked(
         auto rotated_disp = torch::matmul(poses, displacements.unsqueeze(-1)).squeeze(-1);
         output = locations + rotated_disp;
     }
-    
+
     return output;
 }
 
@@ -1104,26 +1106,26 @@ torch::Tensor evidence_aggregation_stacked(
     float min_update,
     float past_weight,
     float present_weight) {
-    
+
     // For stacked evidence aggregation, we need to handle global indexing
     // This is a placeholder - would need specialized kernel for efficiency
     auto output = torch::zeros_like(old_evidence);
-    
+
     // Simple CPU fallback for now
     auto old_cpu = old_evidence.cpu();
     auto new_cpu = new_evidence.cpu();
     auto indices_cpu = test_indices.cpu();
     auto output_cpu = output.cpu();
-    
+
     // Apply updates with global indexing
     for (int i = 0; i < new_evidence.size(0); i++) {
         int global_idx = indices_cpu[i].item<int>();
         if (global_idx >= 0 && global_idx < old_evidence.size(0)) {
-            output_cpu[global_idx] = old_cpu[global_idx] * past_weight + 
+            output_cpu[global_idx] = old_cpu[global_idx] * past_weight +
                                     new_cpu[i] * present_weight;
         }
     }
-    
+
     // Fill non-updated hypotheses with min_update
     for (int i = 0; i < old_evidence.size(0); i++) {
         bool found = false;
@@ -1137,7 +1139,7 @@ torch::Tensor evidence_aggregation_stacked(
             output_cpu[i] = old_cpu[i] * past_weight + min_update * present_weight;
         }
     }
-    
+
     return output.to(old_evidence.device());
 }
 
@@ -1145,18 +1147,18 @@ torch::Tensor pose_transformation_stacked(
     torch::Tensor pose_vectors,     // (3, 3) - shared across all hypotheses
     torch::Tensor reference_poses,  // (total_hyp, 3, 3)
     torch::Tensor trace_offsets) {  // (num_traces,) - for trace-specific pose_vectors
-    
+
     // For stacked pose transformation, pose_vectors might be trace-specific
     // This is a placeholder implementation
     auto output = torch::zeros_like(reference_poses);
-    
+
     // Simple implementation - would need optimization for production
     for (int i = 0; i < reference_poses.size(0); i++) {
         auto ref_pose = reference_poses[i];  // (3, 3)
         auto result = torch::matmul(pose_vectors, ref_pose);
         output[i] = result;
     }
-    
+
     return output;
 }
 
@@ -1166,39 +1168,39 @@ torch::Tensor knn_search_stacked(
     torch::Tensor graph_offsets,    // (num_traces,) - start index for each trace's graph
     torch::Tensor query_offsets,    // (num_traces,) - start index for each trace's queries
     int k_neighbors) {
-    
+
     // For stacked KNN, we need to process each trace's queries against its own graph
     const int num_traces = graph_offsets.size(0);
     const int total_queries = query_locations.size(0);
-    
-    auto indices = torch::zeros({total_queries, k_neighbors}, 
+
+    auto indices = torch::zeros({total_queries, k_neighbors},
                                torch::TensorOptions().dtype(torch::kLong).device(query_locations.device()));
-    
+
     // Process each trace independently
     for (int trace_idx = 0; trace_idx < num_traces; trace_idx++) {
         int graph_start = graph_offsets[trace_idx].item<int>();
-        int graph_end = (trace_idx + 1 < num_traces) ? 
-                       graph_offsets[trace_idx + 1].item<int>() : 
+        int graph_end = (trace_idx + 1 < num_traces) ?
+                       graph_offsets[trace_idx + 1].item<int>() :
                        graph_locations.size(0);
-        
+
         int query_start = query_offsets[trace_idx].item<int>();
-        int query_end = (trace_idx + 1 < num_traces) ? 
-                       query_offsets[trace_idx + 1].item<int>() : 
+        int query_end = (trace_idx + 1 < num_traces) ?
+                       query_offsets[trace_idx + 1].item<int>() :
                        total_queries;
-        
+
         if (query_end <= query_start || graph_end <= graph_start) continue;
-        
+
         // Extract this trace's data
         auto trace_graph = graph_locations.slice(0, graph_start, graph_end);
         auto trace_queries = query_locations.slice(0, query_start, query_end);
-        
+
         // Run KNN search for this trace
         auto trace_indices = knn_search(trace_graph, trace_queries, k_neighbors);
-        
+
         // Copy results to the output tensor
         indices.slice(0, query_start, query_end) = trace_indices;
     }
-    
+
     return indices;
 }
 
@@ -1270,17 +1272,17 @@ torch::Tensor custom_distance_stacked(
     torch::Tensor pose_normals,     // (total_pairs, 3)
     torch::Tensor max_curvatures,  // (num_traces,) - per-trace curvatures
     torch::Tensor trace_offsets) {  // (num_traces,) - cumulative sizes
-    
+
     const int total_pairs = node_locs.size(0);
     const int neighbors = node_locs.size(1);
     const int num_traces = max_curvatures.size(0);
-    
+
     auto distances = torch::empty({total_pairs, neighbors}, node_locs.options());
-    
+
     if (node_locs.device().is_cuda()) {
         const int threads = 256;
         const int blocks = (total_pairs * neighbors + threads - 1) / threads;
-        
+
         AT_DISPATCH_FLOATING_TYPES(node_locs.scalar_type(), "custom_distance_per_trace_cuda", ([&] {
             custom_distance_per_trace_kernel<scalar_t><<<blocks, threads>>>(
                 node_locs.data_ptr<scalar_t>(),
@@ -1303,21 +1305,21 @@ torch::Tensor custom_distance_stacked(
                 auto trace_nodes = node_locs.slice(0, start_idx, end_idx);
                 auto trace_queries = query_locs.slice(0, start_idx, end_idx);
                 auto trace_normals = pose_normals.slice(0, start_idx, end_idx);
-                auto trace_result = custom_distance(trace_nodes, trace_queries, trace_normals, 
+                auto trace_result = custom_distance(trace_nodes, trace_queries, trace_normals,
                                                   max_curvatures[t].item<float>());
                 distances.slice(0, start_idx, end_idx) = trace_result;
             }
             start_idx = end_idx;
         }
     }
-    
+
     return distances;
 }
 
 torch::Tensor angle_calculation_stacked(
     torch::Tensor node_vectors,     // (total_pairs, neighbors, 3)
     torch::Tensor query_vectors) {  // (total_pairs, 3)
-    
+
     // Simple wrapper - existing function should work with stacked data
     return angle_calculation(node_vectors, query_vectors);
 }
@@ -1325,13 +1327,13 @@ torch::Tensor angle_calculation_stacked(
 // Per-trace pose evidence kernel for stacked processing with varying weights
 template<typename scalar_t>
 __global__ void pose_evidence_per_trace_kernel(
-    const scalar_t* __restrict__ pn_angles,
-    const scalar_t* __restrict__ cd1_angles,
+    const scalar_t* __restrict__ pn_angles,     // (total_pairs x ?)
+    const scalar_t* __restrict__ cd1_angles,    // (total_pairs x ?)
     const int* __restrict__ use_cd,
     const scalar_t* __restrict__ pn_weights,    // Per-trace weights
     const scalar_t* __restrict__ cd1_weights,   // Per-trace weights
     const int* __restrict__ trace_offsets,      // Start index for each trace
-    scalar_t* __restrict__ pose_evidence,
+    scalar_t* __restrict__ pose_evidence,       // (total_pairs x ?)
     int total_elements,
     int num_traces) {
 
@@ -1358,17 +1360,16 @@ __global__ void pose_evidence_per_trace_kernel(
     // Calculate CD1 evidence if available
     scalar_t cd1_evidence = 0;
 
-    // Only process CD1 if cd1_weight > 0 (query pose is fully defined)
-    if (cd1_weight > 0) {
-        if (use_cd[idx]) {
-            scalar_t cd1_angle = cd1_angles[idx];
-            scalar_t cd1_error = M_PI / 2.0 - abs(cd1_angle - M_PI / 2.0);
-            cd1_evidence = -(sin(cd1_error) - 0.5);
-        } else {
-            // Double PN evidence if CD1 not available (only when pose is fully defined)
-            pn_evidence *= 2.0;
-        }
-    }
+    // if (use_cd[idx]) {
+    scalar_t cd1_angle = cd1_angles[idx];
+    scalar_t cd1_error = M_PI / 2.0 - abs(cd1_angle - M_PI / 2.0);
+    cd1_evidence = -(sin(cd1_error) - 0.5);
+        // pn_evidence[!use_cd[idx]] *= 2;
+    // }
+    // } else {
+    //     // Double PN evidence if CD1 not available (only when pose is fully defined)
+    //     pn_evidence *= 2.0;
+    // }
 
     // Combine weighted evidence
     pose_evidence[idx] = pn_evidence * pn_weight + cd1_evidence * cd1_weight;
@@ -1381,15 +1382,15 @@ torch::Tensor pose_evidence_stacked(
     torch::Tensor pn_weights,       // (num_traces,) - per-trace weights
     torch::Tensor cd1_weights,      // (num_traces,) - per-trace weights
     torch::Tensor trace_offsets) {  // (num_traces,) - cumulative sizes
-    
+
     const int total_elements = pn_angles.numel();
     const int num_traces = pn_weights.size(0);
     auto pose_evidence_result = torch::empty_like(pn_angles);
-    
+
     if (pn_angles.device().is_cuda()) {
         const int threads = 256;
         const int blocks = (total_elements + threads - 1) / threads;
-        
+
         AT_DISPATCH_FLOATING_TYPES(pn_angles.scalar_type(), "pose_evidence_per_trace_cuda", ([&] {
             pose_evidence_per_trace_kernel<scalar_t><<<blocks, threads>>>(
                 pn_angles.data_ptr<scalar_t>(),
@@ -1409,7 +1410,7 @@ torch::Tensor pose_evidence_stacked(
         auto cd1_angles_flat = cd1_angles.flatten();
         auto use_cd_flat = use_cd.flatten();
         auto result_flat = torch::zeros_like(pn_angles_flat);
-        
+
         for (int i = 0; i < total_elements; i++) {
             // Find trace index
             int trace_idx = 0;
@@ -1419,13 +1420,13 @@ torch::Tensor pose_evidence_stacked(
                 }
                 trace_idx = t;
             }
-            
+
             auto pn_w = pn_weights[trace_idx].item<float>();
             auto cd1_w = cd1_weights[trace_idx].item<float>();
             auto pn_angle = pn_angles_flat[i];
             auto pn_evidence = -(torch::sin(pn_angle / 2.0) - 0.5);
             auto cd1_evidence = torch::zeros_like(pn_evidence);
-            
+
             if (cd1_w > 0 && use_cd_flat[i].item<int>()) {
                 auto cd1_angle = cd1_angles_flat[i];
                 auto cd1_error = M_PI / 2.0 - torch::abs(cd1_angle - M_PI / 2.0);
@@ -1433,19 +1434,19 @@ torch::Tensor pose_evidence_stacked(
             } else if (cd1_w > 0) {
                 pn_evidence *= 2.0;
             }
-            
+
             result_flat[i] = pn_evidence * pn_w + cd1_evidence * cd1_w;
         }
-        
+
         pose_evidence_result = result_flat.view_as(pn_angles);
     }
-    
+
     return pose_evidence_result;
 }
 
 torch::Tensor final_aggregation_stacked(
     torch::Tensor evidence_matrix) {  // (total_hyp, neighbors)
-    
+
     // Simple wrapper - existing function should work with stacked data
     return final_aggregation(evidence_matrix);
 }
@@ -1474,13 +1475,13 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           "Pose evidence calculation");
     m.def("final_aggregation", &final_aggregation,
           "Final aggregation");
-    
+
     // Batch processing functions
     m.def("displacement_batch", &displacement_batch,
           "Batch displacement calculation");
     m.def("knn_search_batch", &knn_search_batch,
           "Batch KNN search");
-    
+
     // Stacked batch processing functions
     m.def("displacement_stacked", &displacement_stacked,
           "Stacked displacement calculation");
