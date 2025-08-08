@@ -113,9 +113,14 @@ class ProfiledHypothesesUpdater(DefaultHypothesesUpdater):
         self.computation_trace_path = computation_trace_path
         self.computation_traces = []
 
+        # Step-level timing for accurate CPU baseline comparison
+        self.step_timings = []
+
         # Enable computation tracing in displacer if requested
         if self.save_computation_trace:
             self.hypotheses_displacer.save_computation_trace = True
+            # Pass learning module reference for step tracking
+            self.hypotheses_displacer.learning_module = None  # Will be set by LM
 
     def update_hypotheses(
         self,
@@ -125,6 +130,7 @@ class ProfiledHypothesesUpdater(DefaultHypothesesUpdater):
         graph_id: str,
         mapper: ChannelMapper,
         evidence_update_threshold: float,
+        current_step: int
     ) -> list[ChannelHypotheses]:
         """Profiled version of hypothesis update."""
 
@@ -139,6 +145,15 @@ class ProfiledHypothesesUpdater(DefaultHypothesesUpdater):
             features, self.graph_memory.get_input_channels_in_graph(graph_id)
         )
 
+        # Get step number from LM buffer if available
+        self.lm_id = "unknown"
+        if hasattr(self, 'learning_module') and self.learning_module is not None:
+            if hasattr(self.learning_module, 'buffer'):
+                step_number = len(self.learning_module.buffer)
+            if hasattr(self.learning_module, 'learning_module_id'):
+                self.lm_id = self.learning_module.learning_module_id
+        # print(f"LM {self.lm_id}")
+        # exit()
         # Save example data for GPU testing
         if self.save_example_data and len(self.saved_examples) < 10:
             example = {
@@ -149,6 +164,9 @@ class ProfiledHypothesesUpdater(DefaultHypothesesUpdater):
                 "mapper": mapper,
                 "evidence_update_threshold": evidence_update_threshold,
                 "input_channels": input_channels_to_use,
+                "step": current_step,
+                "lm_id": self.lm_id,
+                "timestamp": time.time(),
             }
             self.saved_examples.append(example)
 
@@ -183,6 +201,7 @@ class ProfiledHypothesesUpdater(DefaultHypothesesUpdater):
                         graph_id=graph_id,
                         possible_hypotheses=channel_hypotheses,
                         total_hypotheses_count=hypotheses.evidence.shape[0],
+                        current_step=current_step
                     )
                 )
             hypotheses_updates.append(channel_possible_hypotheses)
@@ -237,7 +256,7 @@ class ProfiledHypothesesUpdater(DefaultHypothesesUpdater):
         }
 
         # Save as JSON
-        output_file = os.path.join(output_dir, "hypothesis_profiling_results.json")
+        output_file = os.path.join(output_dir, f"hypothesis_profiling_results_LM{self.lm_id}.json")
         with open(output_file, "w") as f:
             json.dump(summary, f, indent=2, default=str)
 
@@ -245,17 +264,28 @@ class ProfiledHypothesesUpdater(DefaultHypothesesUpdater):
 
         # Save example data if collected
         if self.saved_examples:
-            example_file = os.path.join(output_dir, "hypothesis_update_examples.pkl")
+            example_file = os.path.join(output_dir, f"hypothesis_update_examples_LM{self.lm_id}.pkl")
             with open(example_file, "wb") as f:
                 pickle.dump(self.saved_examples, f)
             logger.info(f"Saved {len(self.saved_examples)} example updates to {example_file}")
         # Save computation traces if collected
         if self.save_computation_trace and hasattr(self.hypotheses_displacer, 'computation_traces'):
-            trace_file = os.path.join(output_dir, self.computation_trace_path)
+            trace_file = os.path.join(output_dir, f"hypothesis_computation_trace_LM{self.lm_id}.pkl")
             traces = self.hypotheses_displacer.computation_traces
+
+            # Add step timing data to traces for GPU comparison
+            if self.step_timings:
+                # Match step timing to traces by step number
+                step_timing_map = {st['step']: st for st in self.step_timings}
+                for trace in traces:
+                    if trace['step'] in step_timing_map:
+                        trace['step_timing'] = step_timing_map[trace['step']]
+
             with open(trace_file, "wb") as f:
                 pickle.dump(traces, f)
             logger.info(f"Saved {len(traces)} computation traces to {trace_file}")
+            if self.step_timings:
+                logger.info(f"Added step timing data for {len(self.step_timings)} steps")
 
         return output_file
 

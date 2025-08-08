@@ -270,6 +270,14 @@ class EvidenceGraphLM(GraphLM):
             tolerances=self.tolerances,
         )
         self.hypotheses_updater = hypotheses_updater_class(**hypotheses_updater_args)
+        # Add reference to learning module for step tracking
+        self.hypotheses_updater.learning_module = self
+        # Also pass to displacer if it exists
+        if hasattr(self.hypotheses_updater, 'hypotheses_displacer'):
+            self.hypotheses_updater.hypotheses_displacer.learning_module = self
+
+        # Add explicit step counter for more robust tracking
+        self.current_step = 0
 
     # =============== Public Interface Functions ===============
 
@@ -708,6 +716,9 @@ class EvidenceGraphLM(GraphLM):
     def _update_possible_matches(self, query):
         """Update evidence for each hypothesis instead of removing them."""
         thread_list = []
+        # Capture step-level timing for GPU comparison
+        step_start_time = time.time()
+
         for graph_id in self.get_all_known_object_ids():
             if self.use_multithreading:
                 # assign separate thread on same CPU to each objects update.
@@ -729,6 +740,20 @@ class EvidenceGraphLM(GraphLM):
                 # call this to prevent main thread from continuing in code
                 # before all evidences are updated.
                 thread.join()
+
+        # Record step timing (accounts for parallelism)
+        step_total_time = time.time() - step_start_time
+        self.current_step += 1
+
+        # Store step timing for GPU comparison if profiled hypotheses updater
+        if hasattr(self.hypotheses_updater, 'step_timings'):
+            self.hypotheses_updater.step_timings.append({
+                'step': self.current_step,
+                'total_time': step_total_time,
+                'num_objects': len(self.get_all_known_object_ids()),
+                'multithreaded': self.use_multithreading,
+                'timestamp': time.time()
+            })
         # NOTE: would not need to do this if we are still voting
         # Call this update in the step method?
         self.possible_matches = self._threshold_possible_matches()
@@ -782,6 +807,7 @@ class EvidenceGraphLM(GraphLM):
             graph_id=graph_id,
             mapper=self.channel_hypothesis_mapping[graph_id],
             evidence_update_threshold=update_threshold,
+            current_step=self.current_step,
         )
 
         if not hypotheses_updates:
@@ -1201,7 +1227,6 @@ class EvidenceGraphLM(GraphLM):
         stats["evidences"] = self.evidence
         stats["symmetry_evidence"] = self.symmetry_evidence
         return stats
-        
     def finalize_profiling(self, output_dir="."):
         """Finalize hypothesis profiling at the end of an experiment."""
         if self.enable_hypothesis_profiling:

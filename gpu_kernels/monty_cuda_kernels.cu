@@ -1329,7 +1329,7 @@ template<typename scalar_t>
 __global__ void pose_evidence_per_trace_kernel(
     const scalar_t* __restrict__ pn_angles,     // (total_pairs x ?)
     const scalar_t* __restrict__ cd1_angles,    // (total_pairs x ?)
-    const int* __restrict__ use_cd,
+    const scalar_t* __restrict__ use_cd_masks,
     const scalar_t* __restrict__ pn_weights,    // Per-trace weights
     const scalar_t* __restrict__ cd1_weights,   // Per-trace weights
     const int* __restrict__ trace_offsets,      // Start index for each trace
@@ -1352,7 +1352,9 @@ __global__ void pose_evidence_per_trace_kernel(
     // Get weights for this trace
     scalar_t pn_weight = pn_weights[trace_idx];
     scalar_t cd1_weight = cd1_weights[trace_idx];
+    scalar_t use_cd = use_cd_masks[idx];
 
+    cd1_weight = cd1_weight * use_cd;
     // Calculate PN evidence: -(sin(angle/2) - 0.5)
     scalar_t pn_angle = pn_angles[idx];
     scalar_t pn_evidence = -(sin(pn_angle / 2.0) - 0.5);
@@ -1364,7 +1366,7 @@ __global__ void pose_evidence_per_trace_kernel(
     scalar_t cd1_angle = cd1_angles[idx];
     scalar_t cd1_error = M_PI / 2.0 - abs(cd1_angle - M_PI / 2.0);
     cd1_evidence = -(sin(cd1_error) - 0.5);
-        // pn_evidence[!use_cd[idx]] *= 2;
+    pn_evidence = pn_evidence * (2.0 - use_cd);
     // }
     // } else {
     //     // Double PN evidence if CD1 not available (only when pose is fully defined)
@@ -1395,7 +1397,7 @@ torch::Tensor pose_evidence_stacked(
             pose_evidence_per_trace_kernel<scalar_t><<<blocks, threads>>>(
                 pn_angles.data_ptr<scalar_t>(),
                 cd1_angles.data_ptr<scalar_t>(),
-                use_cd.data_ptr<int>(),
+                use_cd.data_ptr<scalar_t>(),
                 pn_weights.data_ptr<scalar_t>(),
                 cd1_weights.data_ptr<scalar_t>(),
                 trace_offsets.data_ptr<int>(),
@@ -1404,7 +1406,8 @@ torch::Tensor pose_evidence_stacked(
                 num_traces
             );
         }));
-    } else {
+    }
+    else {
         // CPU fallback with per-trace weights
         auto pn_angles_flat = pn_angles.flatten();
         auto cd1_angles_flat = cd1_angles.flatten();

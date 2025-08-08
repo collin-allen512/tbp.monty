@@ -89,6 +89,7 @@ class ProfiledHypothesesDisplacer(DefaultHypothesesDisplacer):
         graph_id: str,
         possible_hypotheses: ChannelHypotheses,
         total_hypotheses_count: int,
+        current_step: int
     ) -> ChannelHypotheses:
         """Profiled version of hypothesis displacement and evidence computation."""
 
@@ -96,8 +97,13 @@ class ProfiledHypothesesDisplacer(DefaultHypothesesDisplacer):
 
         # Profile displacement calculation
         start_disp = time.perf_counter()
+        # print(f"possible hypotheses poses {possible_hypotheses.poses.shape}")
+        # print(f"channel_displacement poses {channel_displacement.shape}")
         rotated_displacements = possible_hypotheses.poses.dot(channel_displacement)
+        # print(f"rotated_displacements poses {rotated_displacements.shape}")
         search_locations = possible_hypotheses.locations + rotated_displacements
+        # print(f"search_locations poses {search_locations.shape}")
+        # exit()
         time_disp = time.perf_counter() - start_disp
 
         self.timing_data["displacement_calculation"].append(time_disp)
@@ -120,10 +126,33 @@ class ProfiledHypothesesDisplacer(DefaultHypothesesDisplacer):
                 possible_hypotheses.input_channel, []
             )
 
+            # Get step number and LM ID if available
+            # step_number = 0
+            lm_id = "unknown"
+            if hasattr(self, 'learning_module') and self.learning_module is not None:
+                # Use explicit step counter if available, otherwise fallback to buffer length
+                # if hasattr(self.learning_module, 'current_step'):
+            #         step_number = self.learning_module.current_step
+            #     # elif hasattr(self.learning_module, 'buffer'):
+            #     #     step_number = len(self.learning_module.buffer)
+                # print("LM  attribute!")
+                if hasattr(self.learning_module, 'learning_module_id'):
+                    lm_id = self.learning_module.learning_module_id
+                    # print(f"LM Known {lm_id}!")
+            #     else:
+            #         print("No step!")
+            #         exit(-1)
+            # print("LM no attribute!")
+            # exit()
+
             trace = {
                 "step_id": len(self.computation_traces),
                 "graph_id": graph_id,
                 "input_channel": possible_hypotheses.input_channel,
+                "step": current_step,
+                "lm_id": lm_id,
+                "timestamp": time.time(),
+                "timing": {},  # Will be populated with actual CPU timings
                 "inputs": {
                     "channel_displacement": channel_displacement.copy(),
                     "channel_features": {k: v.copy() if hasattr(v, 'copy') else v
@@ -175,7 +204,7 @@ class ProfiledHypothesesDisplacer(DefaultHypothesesDisplacer):
 
             # Profile evidence calculation
             start_evidence = time.perf_counter()
-            new_evidence = self._calculate_evidence_for_new_locations(
+            new_evidence, evidence_intermediates = self._calculate_evidence_for_new_locations(
                 graph_id=graph_id,
                 input_channel=possible_hypotheses.input_channel,
                 search_locations=search_locations[hyp_ids_to_test],
@@ -207,7 +236,17 @@ class ProfiledHypothesesDisplacer(DefaultHypothesesDisplacer):
         self.timing_data["total_displace_and_compute"].append(time_total)
 
         # Complete computation trace if enabled
-        if self.save_computation_trace and 'trace' in locals():
+        if self.save_computation_trace and 'trace' in locals() and len(self.computation_traces) < 500:
+            # Capture actual CPU timing data
+            if num_hypotheses_to_test > 0:
+                trace["evidence_intermediates"] = evidence_intermediates
+            trace["timing"] = {
+                "displacement": time_disp,
+                "evidence_calculation": time_evidence if num_hypotheses_to_test > 0 else 0,
+                "evidence_aggregation": time_agg if num_hypotheses_to_test > 0 else 0,
+                "total": time_total,
+            }
+
             trace["outputs"] = {
                 "final_evidence": evidence.copy(),
                 "final_locations": search_locations.copy(),
@@ -216,7 +255,7 @@ class ProfiledHypothesesDisplacer(DefaultHypothesesDisplacer):
                 trace["intermediates"]["new_evidence"] = new_evidence.copy()
                 trace["intermediates"]["hyp_ids_to_test"] = hyp_ids_to_test.copy()
             self.computation_traces.append(trace)
-            print(f"saving a trace! {len(self.computation_traces)}")
+            print(f"saving a trace! {len(self.computation_traces)} at step {current_step}")
 
         return ChannelHypotheses(
             input_channel=possible_hypotheses.input_channel,
@@ -456,10 +495,10 @@ class ProfiledHypothesesDisplacer(DefaultHypothesesDisplacer):
             }
 
             # Add intermediate data to the current trace
-            if hasattr(self, 'computation_traces') and self.computation_traces:
-                self.computation_traces[-1]["evidence_intermediates"] = evidence_intermediates
+            # if hasattr(self, 'computation_traces') and self.computation_traces:
+            #     self.computation_traces[-1]["evidence_intermediates"] = evidence_intermediates
 
-        return location_evidence
+        return location_evidence, evidence_intermediates
 
     def _get_pose_evidence_matrix(
         self,
@@ -498,7 +537,6 @@ class ProfiledHypothesesDisplacer(DefaultHypothesesDisplacer):
         start_comp = time.perf_counter()
         pn_evidence = -(np.sin(pn_error / 2) - 0.5)
         pn_weight = self.feature_weights[input_channel]["pose_vectors"][0]
-
         if not query_features["pose_fully_defined"]:
             cd1_weight = 0
             cd1_evidence = np.zeros(pn_error.shape)
