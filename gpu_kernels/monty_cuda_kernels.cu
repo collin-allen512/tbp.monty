@@ -774,255 +774,7 @@ torch::Tensor knn_search(
     }
 }
 
-// ============================================================================
-// BATCH PROCESSING KERNELS
-// ============================================================================
-
-// Batch displacement kernel
-template<typename scalar_t>
-__global__ void displacement_batch_kernel(
-    const scalar_t* __restrict__ poses,        // (B*N, 3, 3)
-    const scalar_t* __restrict__ displacement, // (B, 3)
-    const scalar_t* __restrict__ locations,    // (B*N, 3)
-    scalar_t* __restrict__ output,            // (B*N, 3)
-    int B, int N) {
-
-    int batch_idx = blockIdx.y;
-    int hyp_idx = blockIdx.x * blockDim.x + threadIdx.x;
-
-    if (batch_idx >= B || hyp_idx >= N) return;
-
-    int global_idx = batch_idx * N + hyp_idx;
-    int disp_base = batch_idx * 3;
-
-    __shared__ scalar_t s_disp[3];
-    if (threadIdx.x < 3) {
-        s_disp[threadIdx.x] = displacement[disp_base + threadIdx.x];
-    }
-    __syncthreads();
-
-    scalar_t rotated_disp[3] = {scalar_t(0), scalar_t(0), scalar_t(0)};
-
-    rotated_disp[0] = poses[global_idx * 9 + 0] * s_disp[0] +
-                      poses[global_idx * 9 + 1] * s_disp[1] +
-                      poses[global_idx * 9 + 2] * s_disp[2];
-
-    rotated_disp[1] = poses[global_idx * 9 + 3] * s_disp[0] +
-                      poses[global_idx * 9 + 4] * s_disp[1] +
-                      poses[global_idx * 9 + 5] * s_disp[2];
-
-    rotated_disp[2] = poses[global_idx * 9 + 6] * s_disp[0] +
-                      poses[global_idx * 9 + 7] * s_disp[1] +
-                      poses[global_idx * 9 + 8] * s_disp[2];
-
-    output[global_idx * 3 + 0] = locations[global_idx * 3 + 0] + rotated_disp[0];
-    output[global_idx * 3 + 1] = locations[global_idx * 3 + 1] + rotated_disp[1];
-    output[global_idx * 3 + 2] = locations[global_idx * 3 + 2] + rotated_disp[2];
-}
-
-// Batch evidence aggregation kernel
-template<typename scalar_t>
-__global__ void evidence_aggregation_batch_kernel(
-    const scalar_t* __restrict__ old_evidence,   // (B*N,)
-    const scalar_t* __restrict__ new_evidence,   // (B*M,)
-    const int64_t* __restrict__ test_indices,    // (B*M,)
-    const int* __restrict__ batch_offsets,       // (B+1,) - cumulative evidence counts
-    const int* __restrict__ update_offsets,      // (B+1,) - cumulative update counts
-    scalar_t* __restrict__ output_evidence,      // (B*N,)
-    scalar_t min_update,
-    scalar_t past_weight,
-    scalar_t present_weight,
-    int total_evidence) {
-
-    int global_idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (global_idx >= total_evidence) return;
-
-    // Find which batch this evidence belongs to
-    int batch_idx = 0;
-    while (batch_idx < 1000 && batch_offsets[batch_idx + 1] <= global_idx) {
-        batch_idx++;
-    }
-
-    int local_idx = global_idx - batch_offsets[batch_idx];
-    int update_start = update_offsets[batch_idx];
-    int update_end = update_offsets[batch_idx + 1];
-
-    scalar_t update_value = min_update;
-
-    // Check if this hypothesis has an update
-    for (int i = update_start; i < update_end; i++) {
-        if (test_indices[i] == local_idx) {
-            update_value = new_evidence[i];
-            break;
-        }
-    }
-
-    output_evidence[global_idx] = old_evidence[global_idx] * past_weight +
-                                 update_value * present_weight;
-}
-
-// Batch KNN search kernel
-template<typename scalar_t>
-__global__ void knn_search_batch_kernel(
-    const scalar_t* __restrict__ graph_locations, // (B*N_graph, 3)
-    const scalar_t* __restrict__ query_locations, // (B*N_query, 3)
-    const int* __restrict__ graph_offsets,        // (B+1,) - cumulative graph sizes
-    const int* __restrict__ query_offsets,        // (B+1,) - cumulative query sizes
-    int64_t* __restrict__ nearest_indices,        // (B*N_query, K)
-    int total_queries, int K) {
-
-    int global_query_idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (global_query_idx >= total_queries) return;
-
-    // Find which batch this query belongs to
-    int batch_idx = 0;
-    while (batch_idx < 1000 && query_offsets[batch_idx + 1] <= global_query_idx) {
-        batch_idx++;
-    }
-
-    int local_query_idx = global_query_idx - query_offsets[batch_idx];
-    int graph_start = graph_offsets[batch_idx];
-    int graph_end = graph_offsets[batch_idx + 1];
-    int graph_size = graph_end - graph_start;
-
-    scalar_t query_loc[3];
-    for (int i = 0; i < 3; i++) {
-        query_loc[i] = query_locations[global_query_idx * 3 + i];
-    }
-
-    // Use same KNN logic as original, but only search within this batch's graph
-    int safe_K = min(K, graph_size);
-    scalar_t best_distances[64];
-    int64_t best_indices[64];
-
-    // Initialize with first K points from this batch's graph
-    int init_count = min(safe_K, graph_size);
-    for (int k = 0; k < init_count; k++) {
-        int node_idx = graph_start + k;
-        scalar_t dist_sq = 0;
-        for (int i = 0; i < 3; i++) {
-            scalar_t diff = graph_locations[node_idx * 3 + i] - query_loc[i];
-            dist_sq += diff * diff;
-        }
-        best_distances[k] = dist_sq;
-        best_indices[k] = k;  // Store local index within batch
-    }
-
-    // Sort initial set
-    for (int i = 1; i < init_count; i++) {
-        scalar_t key_dist = best_distances[i];
-        int64_t key_idx = best_indices[i];
-        int j = i - 1;
-        while (j >= 0 && best_distances[j] > key_dist) {
-            best_distances[j + 1] = best_distances[j];
-            best_indices[j + 1] = best_indices[j];
-            j--;
-        }
-        best_distances[j + 1] = key_dist;
-        best_indices[j + 1] = key_idx;
-    }
-
-    // Process remaining points in this batch's graph
-    for (int local_node_idx = init_count; local_node_idx < graph_size; local_node_idx++) {
-        int node_idx = graph_start + local_node_idx;
-        scalar_t dist_sq = 0;
-        for (int i = 0; i < 3; i++) {
-            scalar_t diff = graph_locations[node_idx * 3 + i] - query_loc[i];
-            dist_sq += diff * diff;
-        }
-
-        if (dist_sq < best_distances[safe_K - 1]) {
-            int pos = safe_K - 1;
-            while (pos > 0 && best_distances[pos - 1] > dist_sq) {
-                best_distances[pos] = best_distances[pos - 1];
-                best_indices[pos] = best_indices[pos - 1];
-                pos--;
-            }
-            best_distances[pos] = dist_sq;
-            best_indices[pos] = local_node_idx;
-        }
-    }
-
-    // Copy results to output
-    for (int k = 0; k < safe_K; k++) {
-        nearest_indices[global_query_idx * K + k] = best_indices[k];
-    }
-    for (int k = safe_K; k < K; k++) {
-        nearest_indices[global_query_idx * K + k] = -1;
-    }
-}
-
-// Batch wrapper functions
-torch::Tensor displacement_batch(
-    torch::Tensor poses,        // (B, N, 3, 3)
-    torch::Tensor displacement, // (B, 3)
-    torch::Tensor locations) {  // (B, N, 3)
-
-    const int B = poses.size(0);
-    const int N = poses.size(1);
-
-    // Reshape to contiguous memory layout
-    auto poses_flat = poses.view({B * N, 3, 3});
-    auto locations_flat = locations.view({B * N, 3});
-    auto output = torch::empty({B * N, 3}, locations.options());
-
-    // Use 2D grid: (hyp_blocks, batches)
-    const int threads = 256;
-    const dim3 grid((N + threads - 1) / threads, B);
-    const dim3 block(threads);
-
-    AT_DISPATCH_FLOATING_TYPES(poses.scalar_type(), "displacement_batch", ([&] {
-        displacement_batch_kernel<scalar_t><<<grid, block>>>(
-            poses_flat.data_ptr<scalar_t>(),
-            displacement.data_ptr<scalar_t>(),
-            locations_flat.data_ptr<scalar_t>(),
-            output.data_ptr<scalar_t>(),
-            B, N
-        );
-    }));
-
-    return output.view({B, N, 3});
-}
-
-torch::Tensor knn_search_batch(
-    torch::Tensor graph_locations, // (B, N_graph, 3)
-    torch::Tensor query_locations, // (B, N_query, 3)
-    int k_neighbors) {
-
-    const int B = graph_locations.size(0);
-    const int N_graph = graph_locations.size(1);
-    const int N_query = query_locations.size(1);
-    const int total_queries = B * N_query;
-
-    // Flatten for contiguous memory access
-    auto graph_flat = graph_locations.view({B * N_graph, 3});
-    auto query_flat = query_locations.view({B * N_query, 3});
-
-    // Create offset arrays
-    auto graph_offsets = torch::arange(0, (B + 1) * N_graph, N_graph,
-                                      torch::TensorOptions().dtype(torch::kInt32).device(graph_locations.device()));
-    auto query_offsets = torch::arange(0, (B + 1) * N_query, N_query,
-                                      torch::TensorOptions().dtype(torch::kInt32).device(query_locations.device()));
-
-    auto indices = torch::empty({total_queries, k_neighbors},
-                               torch::TensorOptions().dtype(torch::kLong).device(query_locations.device()));
-
-    const int threads = 256;
-    const int blocks = (total_queries + threads - 1) / threads;
-
-    AT_DISPATCH_FLOATING_TYPES(query_locations.scalar_type(), "knn_search_batch", ([&] {
-        knn_search_batch_kernel<scalar_t><<<blocks, threads>>>(
-            graph_flat.data_ptr<scalar_t>(),
-            query_flat.data_ptr<scalar_t>(),
-            graph_offsets.data_ptr<int>(),
-            query_offsets.data_ptr<int>(),
-            indices.data_ptr<int64_t>(),
-            total_queries, k_neighbors
-        );
-    }));
-
-    return indices.view({B, N_query, k_neighbors});
-}
+// NOTE: Batch processing kernels removed - not used by gpu_monty_poc_clean.py
 
 // ============================================================================
 // STACKED BATCH PROCESSING FUNCTIONS
@@ -1097,6 +849,37 @@ torch::Tensor displacement_stacked(
     return output;
 }
 
+// Evidence aggregation kernel for stacked processing
+template<typename scalar_t>
+__global__ void evidence_aggregation_stacked_kernel(
+    const scalar_t* __restrict__ old_evidence,     // (total_hyp,)
+    const scalar_t* __restrict__ new_evidence,     // (total_updates,)
+    const int64_t* __restrict__ test_indices,      // (total_updates,) - global indices
+    scalar_t* __restrict__ output,                 // (total_hyp,)
+    scalar_t min_update,
+    scalar_t past_weight,
+    scalar_t present_weight,
+    int total_hypotheses,
+    int total_updates) {
+
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= total_hypotheses) return;
+
+    // Default: apply min_update to this hypothesis
+    scalar_t update_value = min_update;
+
+    // Check if this hypothesis has a specific update
+    for (int i = 0; i < total_updates; i++) {
+        if (test_indices[i] == idx) {
+            update_value = new_evidence[i];
+            break;
+        }
+    }
+
+    // Apply weighted combination
+    output[idx] = old_evidence[idx] * past_weight + update_value * present_weight;
+}
+
 torch::Tensor evidence_aggregation_stacked(
     torch::Tensor old_evidence,     // (total_hyp,)
     torch::Tensor new_evidence,     // (total_updates,)
@@ -1107,56 +890,126 @@ torch::Tensor evidence_aggregation_stacked(
     float past_weight,
     float present_weight) {
 
-    // For stacked evidence aggregation, we need to handle global indexing
-    // This is a placeholder - would need specialized kernel for efficiency
-    auto output = torch::zeros_like(old_evidence);
+    const int total_hypotheses = old_evidence.size(0);
+    const int total_updates = new_evidence.size(0);
+    auto output = torch::empty_like(old_evidence);
 
-    // Simple CPU fallback for now
-    auto old_cpu = old_evidence.cpu();
-    auto new_cpu = new_evidence.cpu();
-    auto indices_cpu = test_indices.cpu();
-    auto output_cpu = output.cpu();
-
-    // Apply updates with global indexing
-    for (int i = 0; i < new_evidence.size(0); i++) {
-        int global_idx = indices_cpu[i].item<int>();
-        if (global_idx >= 0 && global_idx < old_evidence.size(0)) {
-            output_cpu[global_idx] = old_cpu[global_idx] * past_weight +
-                                    new_cpu[i] * present_weight;
-        }
+    if (test_indices.scalar_type() != torch::kLong) {
+        test_indices = test_indices.to(torch::kLong);
     }
 
-    // Fill non-updated hypotheses with min_update
-    for (int i = 0; i < old_evidence.size(0); i++) {
-        bool found = false;
-        for (int j = 0; j < new_evidence.size(0); j++) {
-            if (indices_cpu[j].item<int>() == i) {
-                found = true;
-                break;
+    if (old_evidence.device().is_cuda()) {
+        const int threads = 256;
+        const int blocks = (total_hypotheses + threads - 1) / threads;
+
+        AT_DISPATCH_FLOATING_TYPES(old_evidence.scalar_type(), "evidence_aggregation_stacked_cuda", ([&] {
+            evidence_aggregation_stacked_kernel<scalar_t><<<blocks, threads>>>(
+                old_evidence.data_ptr<scalar_t>(),
+                new_evidence.data_ptr<scalar_t>(),
+                test_indices.data_ptr<int64_t>(),
+                output.data_ptr<scalar_t>(),
+                static_cast<scalar_t>(min_update),
+                static_cast<scalar_t>(past_weight),
+                static_cast<scalar_t>(present_weight),
+                total_hypotheses,
+                total_updates
+            );
+        }));
+    } else {
+        // CPU fallback
+        auto old_cpu = old_evidence.cpu();
+        auto new_cpu = new_evidence.cpu();
+        auto indices_cpu = test_indices.cpu();
+        auto output_cpu = output.cpu();
+
+        // Apply updates with global indexing
+        for (int i = 0; i < total_hypotheses; i++) {
+            float update_value = min_update;
+            // Check if this hypothesis has a specific update
+            for (int j = 0; j < total_updates; j++) {
+                if (indices_cpu[j].item<int>() == i) {
+                    update_value = new_cpu[j].item<float>();
+                    break;
+                }
             }
-        }
-        if (!found) {
-            output_cpu[i] = old_cpu[i] * past_weight + min_update * present_weight;
+            output_cpu[i] = old_cpu[i].item<float>() * past_weight + update_value * present_weight;
         }
     }
 
-    return output.to(old_evidence.device());
+    return output;
+}
+
+// Pose transformation kernel for stacked processing
+template<typename scalar_t>
+__global__ void pose_transformation_stacked_kernel(
+    const scalar_t* __restrict__ pose_vectors,      // (3, 3) - shared pose vectors
+    const scalar_t* __restrict__ reference_poses,   // (total_hyp, 3, 3)
+    scalar_t* __restrict__ output,                  // (total_hyp, 3, 3)
+    int total_hypotheses) {
+
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= total_hypotheses) return;
+
+    // Load shared pose vectors (3x3 matrix)
+    // __shared__ scalar_t s_pose_vectors[9];
+    // __shared__ scalar_t s_pose_vectors[9];
+    // if (threadIdx.x < 9) {
+    //     s_pose_vectors[threadIdx.x] = pose_vectors[threadIdx.x];
+    // }
+    // __syncthreads();
+    scalar_t s_pose_vectors[9];
+    for (int i = 0; i < 9; i++) {
+        s_pose_vectors[i] = pose_vectors[idx * 9 + i];
+    }
+    // Load reference pose for this hypothesis
+    scalar_t ref_pose[9];
+    for (int i = 0; i < 9; i++) {
+        ref_pose[i] = reference_poses[idx * 9 + i];
+    }
+
+    // Compute pose_vectors @ ref_pose.T (matching CPU implementation)
+    // CPU does: result = np.matmul(reference_poses, pose_vectors_T)
+    // Then: transformed_vectors = result.transpose(0, 2, 1)
+    // This is equivalent to: pose_vectors @ ref_pose.T
+    for (int i = 0; i < 3; i++) {        // row of output
+        for (int j = 0; j < 3; j++) {    // column of output
+            scalar_t sum = 0;
+            for (int k = 0; k < 3; k++) {
+                // s_pose_vectors[i,k] * ref_pose[j,k] (ref_pose transposed)
+                sum += s_pose_vectors[i * 3 + k] * ref_pose[j * 3 + k];
+            }
+            output[idx * 9 + i * 3 + j] = sum;
+        }
+    }
 }
 
 torch::Tensor pose_transformation_stacked(
-    torch::Tensor pose_vectors,     // (3, 3) - shared across all hypotheses
+    torch::Tensor pose_vectors,     // (total_hyp, 3, 3) - shared across all hypotheses
     torch::Tensor reference_poses,  // (total_hyp, 3, 3)
     torch::Tensor trace_offsets) {  // (num_traces,) - for trace-specific pose_vectors
 
-    // For stacked pose transformation, pose_vectors might be trace-specific
-    // This is a placeholder implementation
-    auto output = torch::zeros_like(reference_poses);
+    const int total_hypotheses = reference_poses.size(0);
+    auto output = torch::empty_like(reference_poses);
 
-    // Simple implementation - would need optimization for production
-    for (int i = 0; i < reference_poses.size(0); i++) {
-        auto ref_pose = reference_poses[i];  // (3, 3)
-        auto result = torch::matmul(pose_vectors, ref_pose);
-        output[i] = result;
+    if (reference_poses.device().is_cuda()) {
+        const int threads = 256;
+        const int blocks = (total_hypotheses + threads - 1) / threads;
+
+        AT_DISPATCH_FLOATING_TYPES(reference_poses.scalar_type(), "pose_transformation_stacked_cuda", ([&] {
+            pose_transformation_stacked_kernel<scalar_t><<<blocks, threads>>>(
+                pose_vectors.data_ptr<scalar_t>(),
+                reference_poses.data_ptr<scalar_t>(),
+                output.data_ptr<scalar_t>(),
+                total_hypotheses
+            );
+        }));
+    } else {
+        // CPU fallback
+        for (int i = 0; i < total_hypotheses; i++) {
+            auto ref_pose = reference_poses[i];  // (3, 3)
+            auto result = torch::matmul(pose_vectors, ref_pose);
+            output[i] = result;
+        }
     }
 
     return output;
@@ -1479,11 +1332,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("final_aggregation", &final_aggregation,
           "Final aggregation");
 
-    // Batch processing functions
-    m.def("displacement_batch", &displacement_batch,
-          "Batch displacement calculation");
-    m.def("knn_search_batch", &knn_search_batch,
-          "Batch KNN search");
+    // NOTE: Batch processing functions removed - not used by gpu_monty_poc_clean.py
 
     // Stacked batch processing functions
     m.def("displacement_stacked", &displacement_stacked,

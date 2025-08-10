@@ -176,7 +176,8 @@ class UnifiedStepData:
             # all_pose_vectors.append(item["pose_vectors"].unsqueeze(0).repeat(item["channel_possible_poses"].shape[0], 1, 1))
             all_pose_vectors.append(np.broadcast_to(item["pose_vectors"][None, :, :], (item["channel_possible_poses"].shape[0], 3, 3)))
             pose_offsets.append(pose_offsets[-1] + len(all_channel_poses[-1]))
-
+            # print(f"channel poses shape {all_channel_poses[-1].shape}")
+            # print(f"pose vectors shape {all_pose_vectors[-1].shape}")
             if "search_locations" in item:
                 all_search_locs.append(item["search_locations"])
                 all_nearest_locs.append(item["nearest_node_locs"])
@@ -825,9 +826,13 @@ class MontyOperations:
             raise RuntimeError("CUDA kernels not available")
 
         stacked = unified_data.get_stacked_tensors()
-        pose_vectors_gpu = stacked['pose_vectors']
-        channel_poses_gpu = stacked['channel_poses']
-        pose_offsets_gpu = stacked['pose_offsets']
+        pose_vectors_gpu = stacked['pose_vectors'].contiguous()
+        channel_poses_gpu = stacked['channel_poses'].contiguous()
+        pose_offsets_gpu = stacked['pose_offsets'].contiguous()
+        # print(f" shape {.shape}")
+        # print(f"pose_vectors_gpu shape {pose_vectors_gpu.shape}")
+        # print(f"channel_poses_gpu shape {channel_poses_gpu.shape}")
+        # print(f"pose_offsets_gpu shape {pose_offsets_gpu.shape}")
         # if not stacked:
             # return None, None, 0.0
         # pose_vectors_gpu = pose_vectors.to(self.device)
@@ -955,7 +960,7 @@ def run_step_analysis(traces: List[Dict], operations: MontyOperations,
         step = trace.get("step", 0)
         if step not in traces_by_step:
             traces_by_step[step] = []
-        print(f"Adding trace for step {step} with lm id {trace['lm_id']}")
+        # print(f"Adding trace for step {step} with lm id {trace['lm_id']}")
         traces_by_step[step].append(trace)
     print(f"Processing {len(traces_by_step)} steps with {len(traces)} total traces")
     # exit()
@@ -1911,7 +1916,7 @@ def process_pose_transformation_all_approaches(unified_data: UnifiedStepData,
         gpu_batched_result_np = gpu_batched_result.cpu().numpy()
         batched_trace_diff = np.max(np.abs(cpu_result - gpu_batched_result_np))
         max_batched_diff = max(max_batched_diff, batched_trace_diff)
-        print(batched_trace_diff)
+        # print(batched_trace_diff)
 
     unified_data.verification_results["pose_transformation"] = {
         "max_diff": max_diff,
