@@ -132,9 +132,23 @@ class UnifiedStepData:
                 per_trace_item["nearest_node_locs"] = dist_data["inputs"]["nearest_node_locs"]
                 per_trace_item["pose_normals"] = dist_data["inputs"]["pose_normals"]
                 per_trace_item["max_abs_curvature"] = dist_data["inputs"]["max_abs_curvature"]
+                if ("evidence_aggregation" in trace["evidence_intermediates"]):
+                    evidence_data = trace["evidence_intermediates"]["evidence_aggregation"]
+                    per_trace_item["old_evidence"] = evidence_data["inputs"]["old_evidence"]
+                    per_trace_item['new_evidence'] = evidence_data["inputs"]["new_evidence"]
+                    per_trace_item['hyp_ids_to_test'] = evidence_data["inputs"]["hyp_ids_to_test"]
+                    per_trace_item['evidence_update_threshold'] = evidence_data["inputs"]["evidence_update_threshold"]
+                    per_trace_item['min_update'] = evidence_data["inputs"]["min_update"]
+                    per_trace_item['past_weight'] = evidence_data["inputs"]["past_weight"]
+                    per_trace_item['present_weight'] = evidence_data["inputs"]["present_weight"]
+                    if per_trace_item['past_weight'] != 1 or per_trace_item['present_weight'] != 1:
+                        print("Non-1 weight!")
+                        exit()
+
             per_trace_item["channel_possible_poses"] = trace["evidence_intermediates"]["pose_transformation"]["inputs"]["channel_possible_poses"]
             per_trace_item["channel_features"] = trace["evidence_intermediates"]["pose_transformation"]["inputs"]["channel_features"]
             per_trace_item["pose_vectors"] = trace["evidence_intermediates"]["pose_transformation"]["inputs"]["channel_features"]['pose_vectors']
+
 
 
             self.per_trace_data.append(per_trace_item)
@@ -162,6 +176,13 @@ class UnifiedStepData:
         all_pose_vectors = []
         pose_offsets = [0]
 
+        stacked_evidence_update_threshold = []
+        stacked_hyp_test_ids = []
+        stacked_old_evidence = []
+        stacked_new_evidence = []
+        stacked_min_update = []
+        evidence_update_offsets = [0]
+
 
         for item in self.per_trace_data:
             all_poses.append(item["poses"])
@@ -187,7 +208,21 @@ class UnifiedStepData:
                 # print(item["max_abs_curvature"])
                 all_curvatures.append(item["max_abs_curvature"])
                 distance_offsets.append(distance_offsets[-1] + len(item["search_locations"]))
+            if 'old_evidence' in item:
+                stacked_old_evidence.append(item['old_evidence'])
+                stacked_new_evidence.append(item['new_evidence'])
+                evidence_length = item['new_evidence'].shape[0]
+                stacked_evidence_update_threshold.append(np.repeat(item['evidence_update_threshold'], evidence_length))
+                stacked_min_update.append(np.repeat(item['min_update'], evidence_length))
+                stacked_hyp_test_ids.append(item['hyp_ids_to_test'])
+                evidence_update_offsets.append(evidence_update_offsets[-1] + evidence_length)
 
+        # print(len(stacked_old_evidence))
+        # print(len(stacked_new_evidence))
+        # print(len(stacked_hyp_test_ids))
+        # print(len(stacked_evidence_update_threshold))
+        # print(len(stacked_min_update))
+        # print(len(evidence_update_offsets))
         # Stack into GPU tensors
         self.stacked_data = {
             "poses": torch.from_numpy(np.concatenate(all_poses)).float().to(self.device),
@@ -205,7 +240,13 @@ class UnifiedStepData:
             "num_traces": len(all_poses),
             "channel_poses": torch.from_numpy(np.concatenate(all_channel_poses)).float().to(self.device),
             "pose_offsets": torch.tensor(pose_offsets, dtype=torch.int32, device=self.device),
-            "pose_vectors": torch.from_numpy(np.concatenate(all_pose_vectors)).float().to(self.device)
+            "pose_vectors": torch.from_numpy(np.concatenate(all_pose_vectors)).float().to(self.device),
+            "old_evidence": torch.from_numpy(np.concatenate(stacked_old_evidence)).float().to(self.device),
+            "new_evidence": torch.from_numpy(np.concatenate(stacked_new_evidence)).float().to(self.device),
+            "evidence_update_thresholds": torch.from_numpy(np.concatenate(stacked_evidence_update_threshold)).float().to(self.device),
+            "hyp_test_ids": torch.from_numpy(np.concatenate(stacked_hyp_test_ids)).float().to(self.device),
+            "min_update": torch.from_numpy(np.concatenate(stacked_min_update)).float().to(self.device),
+            "update_offsets": torch.tensor(evidence_update_offsets, dtype=torch.int32, device=self.device),
         }
 
         print(f"Prepared unified data: {self.num_valid_traces} valid traces, {self.stacked_data['total_hypotheses']} total hypotheses")
@@ -856,11 +897,8 @@ class MontyOperations:
 
         return transformed_vectors, pose_offsets_gpu, gpu_time
 
-    def evidence_aggregation_gpu_batched(self, old_evidence_list: List[np.ndarray],
-                                       new_evidence_list: List[np.ndarray],
-                                       test_indices_list: List[np.ndarray],
-                                       unified_data: UnifiedStepData,
-                                       min_update: float, past_weight: float,
+    def evidence_aggregation_gpu_batched(self, unified_data: UnifiedStepData,
+                                        past_weight: float,
                                        present_weight: float) -> Tuple[torch.Tensor, torch.Tensor, float]:
         """Batched GPU evidence aggregation - single kernel call for all traces."""
         if monty_cuda is None:
@@ -870,38 +908,41 @@ class MontyOperations:
         if not stacked:
             return None, None, 0.0
 
-        # Create stacked indices and evidence for all traces
-        stacked_test_indices = []
-        stacked_new_evidence = []
-        update_offsets = [0]
+        # # Create stacked indices and evidence for all traces
+        # stacked_test_indices = []
+        # stacked_new_evidence = []
+        # update_offsets = [0]
 
-        offset = 0
-        for i, (indices, evidence) in enumerate(zip(test_indices_list, new_evidence_list)):
-            # Adjust indices to global hypothesis indexing
-            global_indices = indices + stacked["hyp_offsets"][i]
-            stacked_test_indices.extend(global_indices)
-            stacked_new_evidence.extend(evidence)
-            offset += len(evidence)
-            update_offsets.append(offset)
+        # offset = 0
+        # for i, (indices, evidence) in enumerate(zip(test_indices_list, new_evidence_list)):
+        #     # Adjust indices to global hypothesis indexing
+        #     global_indices = indices + stacked["hyp_offsets"][i]
+        #     stacked_test_indices.extend(global_indices)
+        #     stacked_new_evidence.extend(evidence)
+        #     offset += len(evidence)
+        #     update_offsets.append(offset)
 
-        stacked_test_indices_gpu = torch.tensor(stacked_test_indices, dtype=torch.int64, device=self.device)
-        stacked_new_evidence_gpu = torch.tensor(stacked_new_evidence, dtype=torch.float32, device=self.device)
-        update_offsets_gpu = torch.tensor(update_offsets, dtype=torch.int32, device=self.device)
+        # stacked_test_indices_gpu = torch.tensor(stacked_test_indices, dtype=torch.int64, device=self.device)
+        # stacked_new_evidence_gpu = torch.tensor(stacked_new_evidence, dtype=torch.float32, device=self.device)
+        # update_offsets_gpu = torch.tensor(update_offsets, dtype=torch.int32, device=self.device)
 
         start_time = time.perf_counter()
 
+        stacked_old_evidence = stacked['old_evidence']
+        stacked_new_evidence = stacked['new_evidence']
+        evidence_update_thresholds = stacked['evidence_update_thresholds']
+        min_updates = stacked['min_updates']
         # Call stacked kernel
         aggregated_evidence = monty_cuda.evidence_aggregation_stacked(
-            stacked["evidence"], stacked_new_evidence_gpu, stacked_test_indices_gpu,
-            stacked["hyp_offsets"], update_offsets_gpu,
-            min_update, past_weight, present_weight
+            stacked_old_evidence, stacked_new_evidence, evidence_update_thresholds,
+            min_updates, past_weight, present_weight
         )
 
         if self.device.type == "cuda":
             torch.cuda.synchronize()
         gpu_time = time.perf_counter() - start_time
 
-        return aggregated_evidence, stacked["hyp_offsets"], gpu_time
+        return aggregated_evidence, stacked["update_offsets"], gpu_time
 
     def _aggressive_memory_cleanup(self):
         """Aggressive GPU memory cleanup to prevent accumulation."""
@@ -1950,29 +1991,35 @@ def process_evidence_aggregation_all_approaches(unified_data: UnifiedStepData,
     total_cpu_time = 0
     total_gpu_per_trace_time = 0
 
-    for trace in unified_data.step_traces:
-        # Check if this trace has evidence aggregation data
-        if ("evidence_intermediates" not in trace or
-            "evidence_aggregation" not in trace["evidence_intermediates"]):
-            continue
+    past_weight = 1
+    present_weight = 1
 
-        evidence_data = trace["evidence_intermediates"]["evidence_aggregation"]
+    for i in range(unified_data.num_valid_traces):
+        trace_data = unified_data.get_per_trace_item(i)
+        # Check if this trace has evidence aggregation data
+
+
+        # evidence_data = trace["evidence_intermediates"]["evidence_aggregation"]
 
         # Get real data from trace
-        old_evidence = evidence_data["inputs"]["old_evidence"].astype(np.float32)
-        new_evidence = evidence_data["inputs"]["new_evidence"].astype(np.float32)
-        test_indices = evidence_data["inputs"]["test_indices"].astype(np.int64)
-        min_update = evidence_data["inputs"]["min_update"]
-        past_weight = evidence_data["inputs"]["past_weight"]
-        present_weight = evidence_data["inputs"]["present_weight"]
+        # old_evidence = evidence_data["inputs"]["old_evidence"].astype(np.float32)
+        # new_evidence = evidence_data["inputs"]["new_evidence"].astype(np.float32)
+        # test_indices = evidence_data["inputs"]["test_indices"].astype(np.int64)
+        # min_update = evidence_data["inputs"]["min_update"]
+        # past_weight = evidence_data["inputs"]["past_weight"]
+        # present_weight = evidence_data["inputs"]["present_weight"]
 
-        all_test_indices.append(test_indices)
-        all_new_evidence.append(new_evidence)
-        all_old_evidence.append(old_evidence)
-
+        # all_test_indices.append(test_indices)
+        # all_new_evidence.append(new_evidence)
+        # all_old_evidence.append(old_evidence)
+        old_evidence = trace_data['old_evidence']
+        new_evidence = trace_data['new_evidence']
+        min_update = trace_data['min_update']
+        hyp_ids_to_test = trace_data['hyp_ids_to_test']
+        evidence_update_threshold = trace_data['evidence_update_threshold']
         # CPU version
         aggregated_cpu, cpu_time = operations.evidence_aggregation_cpu(
-            old_evidence, new_evidence, test_indices,
+            old_evidence, new_evidence, hyp_ids_to_test,
             min_update, past_weight, present_weight
         )
         total_cpu_time += cpu_time
@@ -1981,10 +2028,10 @@ def process_evidence_aggregation_all_approaches(unified_data: UnifiedStepData,
         # GPU Per-Trace version
         old_evidence_gpu = torch.from_numpy(old_evidence).to(operations.device)
         new_evidence_gpu = torch.from_numpy(new_evidence).to(operations.device)
-        test_indices_gpu = torch.from_numpy(test_indices.astype(np.int64)).to(operations.device)
+        # test_indices_gpu = torch.from_numpy(test_indices.astype(np.int64)).to(operations.device)
 
         aggregated_gpu, gpu_time = operations.evidence_aggregation_gpu(
-            old_evidence_gpu, new_evidence_gpu, test_indices_gpu,
+            old_evidence_gpu, new_evidence_gpu, evidence_update_threshold,
             min_update, past_weight, present_weight
         )
         total_gpu_per_trace_time += gpu_time
@@ -1996,41 +2043,10 @@ def process_evidence_aggregation_all_approaches(unified_data: UnifiedStepData,
     hypothesis_offsets = None
     if unified_data.num_valid_traces > 0:
         try:
-            # Get stacked data for batch processing
-            stacked = unified_data.get_stacked_tensors()
-            if stacked:
-                # Create stacked indices and evidence for all traces
-                stacked_test_indices = []
-                stacked_new_evidence = []
-                update_offsets = [0]
+            batched_aggregated, update_offsets, total_gpu_batched_time = operations.evidence_aggregation_gpu_batched(
+                unified_data, past_weight, present_weight
+            )
 
-                offset = 0
-                for i, (indices, evidence) in enumerate(zip(all_test_indices, all_new_evidence)):
-                    # Adjust indices to global hypothesis indexing
-                    global_indices = indices + stacked["hyp_offsets"][i]
-                    stacked_test_indices.extend(global_indices)
-                    stacked_new_evidence.extend(evidence)
-                    offset += len(evidence)
-                    update_offsets.append(offset)
-
-                stacked_test_indices_gpu = torch.tensor(stacked_test_indices, dtype=torch.int64, device=operations.device)
-                stacked_new_evidence_gpu = torch.tensor(stacked_new_evidence, dtype=torch.float32, device=operations.device)
-                update_offsets_gpu = torch.tensor(update_offsets, dtype=torch.int32, device=operations.device)
-
-                start_time = time.perf_counter()
-                # Call stacked kernel
-                batched_aggregated = monty_cuda.evidence_aggregation_stacked(
-                    stacked["evidence"], stacked_new_evidence_gpu, stacked_test_indices_gpu,
-                    stacked["hyp_offsets"], update_offsets_gpu,
-                    min_update, past_weight, present_weight
-                )
-
-                if operations.device.type == "cuda":
-                    torch.cuda.synchronize()
-                total_gpu_batched_time = time.perf_counter() - start_time
-
-                # Get hypothesis offsets for result splitting
-                hypothesis_offsets = stacked["hyp_offsets"]
 
         except Exception as e:
             print(f"    Batched GPU failed: {e}")
@@ -2057,8 +2073,8 @@ def process_evidence_aggregation_all_approaches(unified_data: UnifiedStepData,
         max_diff = max(max_diff, trace_diff)
 
         # Batched verification if available
-        if batched_aggregated is not None and hypothesis_offsets is not None:
-            gpu_batched_result = batched_aggregated[hypothesis_offsets[i]:hypothesis_offsets[i+1]]
+        if batched_aggregated is not None and update_offsets is not None:
+            gpu_batched_result = batched_aggregated[update_offsets[i]:hypothesis_offsets[i+1]]
             gpu_batched_result_np = gpu_batched_result.cpu().numpy()
             batched_trace_diff = np.max(np.abs(cpu_result - gpu_batched_result_np))
             max_batched_diff = max(max_batched_diff, batched_trace_diff)

@@ -48,8 +48,8 @@ template<typename scalar_t>
 __global__ void evidence_aggregation_kernel(
     const scalar_t* __restrict__ old_evidence,
     const scalar_t* __restrict__ new_evidence,
-    const int64_t* __restrict__ test_indices,
     scalar_t* __restrict__ output_evidence,
+    scalar_t evidence_update_threshold,
     scalar_t min_update,
     scalar_t past_weight,
     scalar_t present_weight,
@@ -61,12 +61,17 @@ __global__ void evidence_aggregation_kernel(
 
     scalar_t update_value = min_update;
 
-    for (int i = 0; i < M; i++) {
-        if (test_indices[i] == idx) {
-            update_value = new_evidence[i];
-            break;
-        }
+    // for (int i = 0; i < M; i++) {
+    //     if (test_indices[i] == idx) {
+    //         update_value = new_evidence[i];
+    //         break;
+    //     }
+    // }
+    if (old_evidence[idx] > evidence_update_threshold) {
+        update_value = new_evidence[idx];
     }
+    // do_update = old_evidence > evidence_update_threshold;
+    // update_value = !do_update*min_update + do_update*new_evidence[idx];
 
     output_evidence[idx] = old_evidence[idx] * past_weight +
                           update_value * present_weight;
@@ -296,7 +301,7 @@ torch::Tensor displacement_cuda(
 torch::Tensor evidence_aggregation_cuda(
     torch::Tensor old_evidence,
     torch::Tensor new_evidence,
-    torch::Tensor test_indices,
+    float evidence_update_threshold,
     float min_update,
     float past_weight,
     float present_weight) {
@@ -305,10 +310,6 @@ torch::Tensor evidence_aggregation_cuda(
     const int M = new_evidence.size(0);
     auto output = torch::empty_like(old_evidence);
 
-    if (test_indices.scalar_type() != torch::kLong) {
-        test_indices = test_indices.to(torch::kLong);
-    }
-
     const int threads = 256;
     const int blocks = (N + threads - 1) / threads;
 
@@ -316,8 +317,8 @@ torch::Tensor evidence_aggregation_cuda(
         evidence_aggregation_kernel<scalar_t><<<blocks, threads>>>(
             old_evidence.data_ptr<scalar_t>(),
             new_evidence.data_ptr<scalar_t>(),
-            test_indices.data_ptr<int64_t>(),
             output.data_ptr<scalar_t>(),
+            static_cast<scalar_t>(evidence_update_threshold),
             static_cast<scalar_t>(min_update),
             static_cast<scalar_t>(past_weight),
             static_cast<scalar_t>(present_weight),
@@ -738,19 +739,13 @@ torch::Tensor displacement(
 torch::Tensor evidence_aggregation(
     torch::Tensor old_evidence,
     torch::Tensor new_evidence,
-    torch::Tensor test_indices,
+    float evidence_update_threshold,
     float min_update,
     float past_weight,
     float present_weight) {
-    if (old_evidence.device().is_cuda()) {
-        return evidence_aggregation_cuda(
-            old_evidence, new_evidence, test_indices,
-            min_update, past_weight, present_weight);
-    } else {
-        return evidence_aggregation_cpu(
-            old_evidence, new_evidence, test_indices,
-            min_update, past_weight, present_weight);
-    }
+    return evidence_aggregation_cuda(
+        old_evidence, new_evidence, evidence_update_threshold,
+        min_update, past_weight, present_weight);
 }
 
 torch::Tensor pose_transformation(
@@ -854,9 +849,10 @@ template<typename scalar_t>
 __global__ void evidence_aggregation_stacked_kernel(
     const scalar_t* __restrict__ old_evidence,     // (total_hyp,)
     const scalar_t* __restrict__ new_evidence,     // (total_updates,)
-    const int64_t* __restrict__ test_indices,      // (total_updates,) - global indices
+    const scalar_t* __restrict__ evidence_update_thresholds,      // (total_updates,) - global indices
+    const scalar_t* __restrict__ min_updates,      // (total_updates,) - global indices
     scalar_t* __restrict__ output,                 // (total_hyp,)
-    scalar_t min_update,
+    // scalar_t min_update,
     scalar_t past_weight,
     scalar_t present_weight,
     int total_hypotheses,
@@ -866,14 +862,17 @@ __global__ void evidence_aggregation_stacked_kernel(
     if (idx >= total_hypotheses) return;
 
     // Default: apply min_update to this hypothesis
-    scalar_t update_value = min_update;
+    scalar_t update_value = min_updates[idx];
 
     // Check if this hypothesis has a specific update
-    for (int i = 0; i < total_updates; i++) {
-        if (test_indices[i] == idx) {
-            update_value = new_evidence[i];
-            break;
-        }
+    // for (int i = 0; i < total_updates; i++) {
+    //     if (test_indices[i] == idx) {
+    //         update_value = new_evidence[i];
+    //         break;
+    //     }
+    // }
+    if (old_evidence[idx] > evidence_update_thresholds[idx]) {
+        update_value = new_evidence[idx];
     }
 
     // Apply weighted combination
@@ -882,21 +881,17 @@ __global__ void evidence_aggregation_stacked_kernel(
 
 torch::Tensor evidence_aggregation_stacked(
     torch::Tensor old_evidence,     // (total_hyp,)
-    torch::Tensor new_evidence,     // (total_updates,)
-    torch::Tensor test_indices,     // (total_updates,) - global indices
+    torch::Tensor new_evidence,     // (total_hyp,)
+    torch::Tensor evidence_update_thresholds,     // (total_hyp,)
+    torch::Tensor min_updates,     // (total_hyp,)
     torch::Tensor trace_offsets,    // (num_traces,) - hypothesis offsets per trace
     torch::Tensor update_offsets,   // (num_traces,) - update offsets per trace
-    float min_update,
     float past_weight,
     float present_weight) {
 
     const int total_hypotheses = old_evidence.size(0);
     const int total_updates = new_evidence.size(0);
     auto output = torch::empty_like(old_evidence);
-
-    if (test_indices.scalar_type() != torch::kLong) {
-        test_indices = test_indices.to(torch::kLong);
-    }
 
     if (old_evidence.device().is_cuda()) {
         const int threads = 256;
@@ -906,34 +901,15 @@ torch::Tensor evidence_aggregation_stacked(
             evidence_aggregation_stacked_kernel<scalar_t><<<blocks, threads>>>(
                 old_evidence.data_ptr<scalar_t>(),
                 new_evidence.data_ptr<scalar_t>(),
-                test_indices.data_ptr<int64_t>(),
+                evidence_update_thresholds.data_ptr<scalar_t>(),
+                min_updates.data_ptr<scalar_t>(),
                 output.data_ptr<scalar_t>(),
-                static_cast<scalar_t>(min_update),
                 static_cast<scalar_t>(past_weight),
                 static_cast<scalar_t>(present_weight),
                 total_hypotheses,
                 total_updates
             );
         }));
-    } else {
-        // CPU fallback
-        auto old_cpu = old_evidence.cpu();
-        auto new_cpu = new_evidence.cpu();
-        auto indices_cpu = test_indices.cpu();
-        auto output_cpu = output.cpu();
-
-        // Apply updates with global indexing
-        for (int i = 0; i < total_hypotheses; i++) {
-            float update_value = min_update;
-            // Check if this hypothesis has a specific update
-            for (int j = 0; j < total_updates; j++) {
-                if (indices_cpu[j].item<int>() == i) {
-                    update_value = new_cpu[j].item<float>();
-                    break;
-                }
-            }
-            output_cpu[i] = old_cpu[i].item<float>() * past_weight + update_value * present_weight;
-        }
     }
 
     return output;
