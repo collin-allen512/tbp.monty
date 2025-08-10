@@ -118,6 +118,7 @@ class UnifiedStepData:
         # Prepare per-trace data
         for trace in self.valid_traces:
             inputs = trace["inputs"]
+            trace["evidence_intermediates"]["pose_transformation"]["inputs"]["channel_possible_poses"]
             per_trace_item = {
                 "poses": inputs["initial_hypotheses"]["poses"],
                 "locations": inputs["initial_hypotheses"]["locations"],
@@ -131,6 +132,10 @@ class UnifiedStepData:
                 per_trace_item["nearest_node_locs"] = dist_data["inputs"]["nearest_node_locs"]
                 per_trace_item["pose_normals"] = dist_data["inputs"]["pose_normals"]
                 per_trace_item["max_abs_curvature"] = dist_data["inputs"]["max_abs_curvature"]
+            per_trace_item["channel_possible_poses"] = trace["evidence_intermediates"]["pose_transformation"]["inputs"]["channel_possible_poses"]
+            per_trace_item["channel_features"] = trace["evidence_intermediates"]["pose_transformation"]["inputs"]["channel_features"]
+            per_trace_item["pose_vectors"] = trace["evidence_intermediates"]["pose_transformation"]["inputs"]["channel_features"]['pose_vectors']
+
 
             self.per_trace_data.append(per_trace_item)
 
@@ -145,6 +150,7 @@ class UnifiedStepData:
         all_locations = []
         all_evidence = []
         all_displacements = []
+        all_channel_poses = []
         hyp_offsets = [0]
 
         all_search_locs = []
@@ -152,6 +158,10 @@ class UnifiedStepData:
         all_pose_normals = []
         all_curvatures = []
         distance_offsets = [0]
+        all_channel_features = []
+        all_pose_vectors = []
+        pose_offsets = [0]
+
 
         for item in self.per_trace_data:
             all_poses.append(item["poses"])
@@ -159,6 +169,14 @@ class UnifiedStepData:
             all_evidence.append(item["evidence"])
             all_displacements.append(item["displacement"])
             hyp_offsets.append(hyp_offsets[-1] + len(item["poses"]))
+
+            all_channel_poses.append(item["channel_possible_poses"])
+            all_channel_features.append(item["channel_features"])
+            # all_pose_vectors.append(item["pose_vectors"].unsqueeze(0).repeat(item["channel_possible_poses"].shape[0], 1, 1))
+            # all_pose_vectors.append(item["pose_vectors"].unsqueeze(0).repeat(item["channel_possible_poses"].shape[0], 1, 1))
+            all_pose_vectors.append(np.broadcast_to(item["pose_vectors"][None, :, :], (item["channel_possible_poses"].shape[0], 3, 3)))
+            pose_offsets.append(pose_offsets[-1] + len(all_channel_poses[-1]))
+
             if "search_locations" in item:
                 all_search_locs.append(item["search_locations"])
                 all_nearest_locs.append(item["nearest_node_locs"])
@@ -183,7 +201,10 @@ class UnifiedStepData:
             "curvatures": torch.tensor(all_curvatures, device=self.device).float(),
             "hyp_counts": torch.tensor([len(poses) for poses in all_poses], dtype=torch.int32, device=self.device),
             "total_hypotheses": sum(len(poses) for poses in all_poses),
-            "num_traces": len(all_poses)
+            "num_traces": len(all_poses),
+            "channel_poses": torch.from_numpy(np.concatenate(all_channel_poses)).float().to(self.device),
+            "pose_offsets": torch.tensor(pose_offsets, dtype=torch.int32, device=self.device),
+            "pose_vectors": torch.from_numpy(np.concatenate(all_pose_vectors)).float().to(self.device)
         }
 
         print(f"Prepared unified data: {self.num_valid_traces} valid traces, {self.stacked_data['total_hypotheses']} total hypotheses")
@@ -561,6 +582,90 @@ class MontyOperations:
         return final_evidence, cpu_time
 
     # =================================================================
+    # 6. POSE TRANSFORMATION OPERATIONS
+    # =================================================================
+
+    def pose_transformation_gpu(self, pose_vectors: torch.Tensor,
+                               reference_poses: torch.Tensor) -> Tuple[torch.Tensor, float]:
+        """GPU implementation of pose transformation using CUDA kernels."""
+        if monty_cuda is None:
+            raise RuntimeError("CUDA kernels not available")
+
+        start_time = time.perf_counter()
+
+        # Use CUDA kernel for pose transformation
+        # This implements: rotated_pv = ref_frame_rots.dot(old_pv.T).transpose((0, 2, 1))
+        transformed_vectors = monty_cuda.pose_transformation(
+            pose_vectors, reference_poses
+        )
+
+        if self.device.type == "cuda":
+            torch.cuda.synchronize()
+        gpu_time = time.perf_counter() - start_time
+
+        return transformed_vectors, gpu_time
+
+    def pose_transformation_cpu(self, pose_vectors: np.ndarray,
+                               reference_poses: np.ndarray) -> Tuple[np.ndarray, float]:
+        """CPU implementation matching rotate_pose_dependent_features exactly."""
+        start_time = time.perf_counter()
+
+        # Exact implementation from spatial_arithmetics.py:
+        # rotated_pv = ref_frame_rots.dot(old_pv.T)
+        # rotated_pv = rotated_pv.transpose((0, 2, 1))
+        pose_vectors_T = pose_vectors.T
+        result = np.matmul(reference_poses, pose_vectors_T)
+        transformed_vectors = result.transpose(0, 2, 1)
+
+        cpu_time = time.perf_counter() - start_time
+
+        return transformed_vectors, cpu_time
+
+    # =================================================================
+    # 7. EVIDENCE AGGREGATION OPERATIONS
+    # =================================================================
+
+    def evidence_aggregation_gpu(self, old_evidence: torch.Tensor,
+                                new_evidence: torch.Tensor, test_indices: torch.Tensor,
+                                min_update: float, past_weight: float,
+                                present_weight: float) -> Tuple[torch.Tensor, float]:
+        """GPU implementation of evidence aggregation using CUDA kernels."""
+        if monty_cuda is None:
+            raise RuntimeError("CUDA kernels not available")
+
+        start_time = time.perf_counter()
+
+        # Use CUDA kernel for evidence aggregation
+        aggregated_evidence = monty_cuda.evidence_aggregation(
+            old_evidence, new_evidence, test_indices,
+            min_update, past_weight, present_weight
+        )
+
+        if self.device.type == "cuda":
+            torch.cuda.synchronize()
+        gpu_time = time.perf_counter() - start_time
+
+        return aggregated_evidence, gpu_time
+
+    def evidence_aggregation_cpu(self, old_evidence: np.ndarray,
+                                new_evidence: np.ndarray, test_indices: np.ndarray,
+                                min_update: float, past_weight: float,
+                                present_weight: float) -> Tuple[np.ndarray, float]:
+        """CPU implementation matching Monty evidence aggregation exactly."""
+        start_time = time.perf_counter()
+
+        # Exact implementation from Monty codebase
+        evidence_to_add = np.ones_like(old_evidence) * min_update
+        evidence_to_add[test_indices] = new_evidence
+
+        # Weighted combination of past and present evidence
+        aggregated_evidence = old_evidence * past_weight + evidence_to_add * present_weight
+
+        cpu_time = time.perf_counter() - start_time
+
+        return aggregated_evidence, cpu_time
+
+    # =================================================================
     # BATCHED GPU OPERATIONS - SINGLE DISPATCH FOR ALL TRACES
     # =================================================================
 
@@ -711,6 +816,88 @@ class MontyOperations:
 
         return final_evidence, gpu_time
 
+    def pose_transformation_gpu_batched(self, unified_data: UnifiedStepData) -> Tuple[torch.Tensor, torch.Tensor, float]:
+            # self, pose_vectors: torch.Tensor,
+            #                            reference_poses_batched: torch.Tensor,
+            #                            pose_offsets: List) -> Tuple[torch.Tensor, torch.Tensor, float]:
+        """Batched GPU pose transformation - single kernel call for all traces."""
+        if monty_cuda is None:
+            raise RuntimeError("CUDA kernels not available")
+
+        stacked = unified_data.get_stacked_tensors()
+        pose_vectors_gpu = stacked['pose_vectors']
+        channel_poses_gpu = stacked['channel_poses']
+        pose_offsets_gpu = stacked['pose_offsets']
+        # if not stacked:
+            # return None, None, 0.0
+        # pose_vectors_gpu = pose_vectors.to(self.device)
+        # reference_poses_gpu = reference_poses_batched.to(self.device)
+        # pose_vectors_gpu = torch.from_numpy(pose_vectors).to(self.device)
+        # pose_offsets_gpu = torch.Tensor(pose_offsets).to(self.device)
+        # reference_poses_gpu = torch.from_numpy(reference_poses_batched).to(self.device)
+        # trace_offsets = torch.tensor([0, unified_data.num_valid_traces], dtype=torch.int32, device=self.device)
+        # print(f"pose vectors {pose_vectors_gpu.shape} ref poses {reference_poses_gpu.shape}")
+
+        start_time = time.perf_counter()
+
+        # Call stacked kernel
+        transformed_vectors = monty_cuda.pose_transformation_stacked(
+            pose_vectors_gpu, channel_poses_gpu, pose_offsets_gpu
+        )
+
+        if self.device.type == "cuda":
+            torch.cuda.synchronize()
+        gpu_time = time.perf_counter() - start_time
+
+        return transformed_vectors, pose_offsets_gpu, gpu_time
+
+    def evidence_aggregation_gpu_batched(self, old_evidence_list: List[np.ndarray],
+                                       new_evidence_list: List[np.ndarray],
+                                       test_indices_list: List[np.ndarray],
+                                       unified_data: UnifiedStepData,
+                                       min_update: float, past_weight: float,
+                                       present_weight: float) -> Tuple[torch.Tensor, torch.Tensor, float]:
+        """Batched GPU evidence aggregation - single kernel call for all traces."""
+        if monty_cuda is None:
+            raise RuntimeError("CUDA kernels not available")
+
+        stacked = unified_data.get_stacked_tensors()
+        if not stacked:
+            return None, None, 0.0
+
+        # Create stacked indices and evidence for all traces
+        stacked_test_indices = []
+        stacked_new_evidence = []
+        update_offsets = [0]
+
+        offset = 0
+        for i, (indices, evidence) in enumerate(zip(test_indices_list, new_evidence_list)):
+            # Adjust indices to global hypothesis indexing
+            global_indices = indices + stacked["hyp_offsets"][i]
+            stacked_test_indices.extend(global_indices)
+            stacked_new_evidence.extend(evidence)
+            offset += len(evidence)
+            update_offsets.append(offset)
+
+        stacked_test_indices_gpu = torch.tensor(stacked_test_indices, dtype=torch.int64, device=self.device)
+        stacked_new_evidence_gpu = torch.tensor(stacked_new_evidence, dtype=torch.float32, device=self.device)
+        update_offsets_gpu = torch.tensor(update_offsets, dtype=torch.int32, device=self.device)
+
+        start_time = time.perf_counter()
+
+        # Call stacked kernel
+        aggregated_evidence = monty_cuda.evidence_aggregation_stacked(
+            stacked["evidence"], stacked_new_evidence_gpu, stacked_test_indices_gpu,
+            stacked["hyp_offsets"], update_offsets_gpu,
+            min_update, past_weight, present_weight
+        )
+
+        if self.device.type == "cuda":
+            torch.cuda.synchronize()
+        gpu_time = time.perf_counter() - start_time
+
+        return aggregated_evidence, stacked["hyp_offsets"], gpu_time
+
     def _aggressive_memory_cleanup(self):
         """Aggressive GPU memory cleanup to prevent accumulation."""
         if self.device.type != "cuda":
@@ -776,11 +963,13 @@ def run_step_analysis(traces: List[Dict], operations: MontyOperations,
     # Function mapping
     function_map = {
         "displacement": ["displacement"],
+        "pose_transformation": ["pose_transformation"],
+        "evidence_aggregation": ["evidence_aggregation"],
         "knn_search": ["displacement", "knn_search"],
         "distance": ["displacement", "knn_search", "distance_calculation"],
         "pose_evidence": ["displacement", "knn_search", "distance_calculation", "pose_evidence"],
         "aggregation": ["displacement", "knn_search", "distance_calculation", "pose_evidence", "final_aggregation"],
-        None: ["displacement", "knn_search", "distance_calculation", "pose_evidence", "final_aggregation"]
+        None: ["displacement", "pose_transformation", "evidence_aggregation", "knn_search", "distance_calculation", "pose_evidence", "final_aggregation"]
     }
 
     functions_to_test = function_map.get(target_function, function_map[None])
@@ -873,6 +1062,10 @@ def process_function_all_approaches(func_name: str, unified_data: UnifiedStepDat
     try:
         if func_name == "displacement":
             return process_displacement_all_approaches(unified_data, operations)
+        elif func_name == "pose_transformation":
+            return process_pose_transformation_all_approaches(unified_data, operations)
+        elif func_name == "evidence_aggregation":
+            return process_evidence_aggregation_all_approaches(unified_data, operations)
         elif func_name == "knn_search":
             return process_knn_search_all_approaches(unified_data, operations)
         elif func_name == "distance_calculation":
@@ -1617,6 +1810,273 @@ def process_final_aggregation_all_approaches(unified_data: UnifiedStepData,
     return True
 
 
+def process_pose_transformation_all_approaches(unified_data: UnifiedStepData,
+                                              operations: MontyOperations) -> bool:
+    """Process pose transformation with CPU, GPU per-trace, and GPU batched approaches."""
+
+    # CPU and GPU Per-Trace processing
+    all_transformed_cpu = []
+    all_transformed_gpu_per_trace = []
+
+    total_cpu_time = 0
+    total_gpu_per_trace_time = 0
+    # for trace in unified_data.step_traces:
+    for i in range(unified_data.num_valid_traces):
+        trace_data = unified_data.get_per_trace_item(i)
+        # Check if this trace has pose transformation data
+        # if ("evidence_intermediates" not in trace or
+        #     "pose_transformation" not in trace["evidence_intermediates"]):
+        #     continue
+
+
+        # print(f"reference_poses {reference_poses.shape}")
+
+        # all_reference_poses.append(reference_poses)
+        # pose_offsets.append(pose_offsets[-1] + len(reference_poses))
+
+        # pose_vectors = channel_features["pose_vectors"].astype(np.float32)  # (3, 3)
+        # if pre_pose is not None:
+        #     print(f"Pose diff {(pre_pose - pose_vectors)}")
+        # pre_pose = pose_vectors
+        # all_pose_vectors.append(pose_vectors.unsqueeze(0).repeat(reference_poses.shape[0], 1, 1))
+        # print(f"pose vectors {all_pose_vectors[-1].shape}")
+
+        channel_poses = trace_data['channel_possible_poses']
+        pose_vectors = trace_data['pose_vectors']
+
+        # CPU version
+        transformed_cpu, cpu_time = operations.pose_transformation_cpu(
+            pose_vectors, channel_poses
+        )
+        total_cpu_time += cpu_time
+        all_transformed_cpu.append(transformed_cpu)
+
+        # GPU Per-Trace version
+        pose_vectors_gpu = torch.from_numpy(pose_vectors).to(operations.device)
+        channel_poses_gpu = torch.from_numpy(channel_poses).to(operations.device)
+
+        transformed_gpu, gpu_time = operations.pose_transformation_gpu(
+            pose_vectors_gpu, channel_poses_gpu
+        )
+        total_gpu_per_trace_time += gpu_time
+        all_transformed_gpu_per_trace.append(transformed_gpu)
+
+    # GPU Batched processing using wrapper function
+    total_gpu_batched_time = 0
+    batched_transformed = None
+    try:
+        # reference_poses_batched = torch.cat([torch.from_numpy(r) for r in all_reference_poses])
+        # pose_vectors_batched = torch.cat([torch.from_numpy(r) for r in all_pose_vectors])
+        # Use the first trace's pose_vectors (they should be the same across traces)
+        # first_trace = None
+        # for trace in unified_data.step_traces:
+        #     if ("evidence_intermediates" in trace and
+        #         "pose_transformation" in trace["evidence_intermediates"]):
+        #         first_trace = trace
+        #         break
+
+        # if first_trace:
+        # pose_data = first_trace["evidence_intermediates"]["pose_transformation"]
+        # channel_features = pose_data["inputs"]["channel_features"]
+        # pose_vectors = channel_features["pose_vectors"].astype(np.float32)
+
+        batched_transformed, pose_offsets, total_gpu_batched_time = operations.pose_transformation_gpu_batched(
+            unified_data
+        )
+        # print("batch")
+        # print(batched_transformed.shape)
+        # print(sum(pose_offsets))
+
+    except Exception as e:
+        print(f"    Batched GPU failed: {e}")
+        total_gpu_batched_time = 0
+
+    # Store results and timing
+    unified_data.cpu_times["pose_transformation"] = total_cpu_time
+    unified_data.gpu_per_trace_times["pose_transformation"] = total_gpu_per_trace_time
+    unified_data.gpu_batched_times["pose_transformation"] = total_gpu_batched_time
+
+    # Verify results
+    max_diff = 0
+    max_batched_diff = 0
+    for i in range(len(all_transformed_cpu)):
+        cpu_result = all_transformed_cpu[i]
+        gpu_result = all_transformed_gpu_per_trace[i].cpu().numpy()
+
+        # Per-trace verification
+        trace_diff = np.max(np.abs(cpu_result - gpu_result))
+        max_diff = max(max_diff, trace_diff)
+
+        gpu_batched_result = batched_transformed[pose_offsets[i]:pose_offsets[i+1]]
+        gpu_batched_result_np = gpu_batched_result.cpu().numpy()
+        batched_trace_diff = np.max(np.abs(cpu_result - gpu_batched_result_np))
+        max_batched_diff = max(max_batched_diff, batched_trace_diff)
+        print(batched_trace_diff)
+
+    unified_data.verification_results["pose_transformation"] = {
+        "max_diff": max_diff,
+        "max_batched_diff": max_batched_diff,
+        "passed": max_diff < 1e-5
+    }
+
+    # Print timing comparison
+    print(f"    CPU: {total_cpu_time * 1000:.3f}ms")
+    print(f"    GPU Per-Trace: {total_gpu_per_trace_time * 1000:.3f}ms")
+    print(f"    GPU Batched: {total_gpu_batched_time * 1000:.3f}ms")
+    if total_cpu_time > 0:
+        per_trace_speedup = total_cpu_time / total_gpu_per_trace_time if total_gpu_per_trace_time > 0 else 0
+        batched_speedup = total_cpu_time / total_gpu_batched_time if total_gpu_batched_time > 0 else 0
+        print(f"    Per-Trace Speedup: {per_trace_speedup:.2f}x, Batched Speedup: {batched_speedup:.2f}x")
+    print(f"    Per-trace max diff: {max_diff:.2e}, Batched max diff: {max_batched_diff:.2e}")
+
+    return True
+
+
+def process_evidence_aggregation_all_approaches(unified_data: UnifiedStepData,
+                                               operations: MontyOperations) -> bool:
+    """Process evidence aggregation with CPU, GPU per-trace, and GPU batched approaches."""
+
+    # CPU and GPU Per-Trace processing
+    all_aggregated_cpu = []
+    all_aggregated_gpu_per_trace = []
+    all_test_indices = []  # Store for batched processing
+    all_new_evidence = []  # Store for batched processing
+    all_old_evidence = []  # Store for batched processing
+    total_cpu_time = 0
+    total_gpu_per_trace_time = 0
+
+    for trace in unified_data.step_traces:
+        # Check if this trace has evidence aggregation data
+        if ("evidence_intermediates" not in trace or
+            "evidence_aggregation" not in trace["evidence_intermediates"]):
+            continue
+
+        evidence_data = trace["evidence_intermediates"]["evidence_aggregation"]
+
+        # Get real data from trace
+        old_evidence = evidence_data["inputs"]["old_evidence"].astype(np.float32)
+        new_evidence = evidence_data["inputs"]["new_evidence"].astype(np.float32)
+        test_indices = evidence_data["inputs"]["test_indices"].astype(np.int64)
+        min_update = evidence_data["inputs"]["min_update"]
+        past_weight = evidence_data["inputs"]["past_weight"]
+        present_weight = evidence_data["inputs"]["present_weight"]
+
+        all_test_indices.append(test_indices)
+        all_new_evidence.append(new_evidence)
+        all_old_evidence.append(old_evidence)
+
+        # CPU version
+        aggregated_cpu, cpu_time = operations.evidence_aggregation_cpu(
+            old_evidence, new_evidence, test_indices,
+            min_update, past_weight, present_weight
+        )
+        total_cpu_time += cpu_time
+        all_aggregated_cpu.append(aggregated_cpu)
+
+        # GPU Per-Trace version
+        old_evidence_gpu = torch.from_numpy(old_evidence).to(operations.device)
+        new_evidence_gpu = torch.from_numpy(new_evidence).to(operations.device)
+        test_indices_gpu = torch.from_numpy(test_indices.astype(np.int64)).to(operations.device)
+
+        aggregated_gpu, gpu_time = operations.evidence_aggregation_gpu(
+            old_evidence_gpu, new_evidence_gpu, test_indices_gpu,
+            min_update, past_weight, present_weight
+        )
+        total_gpu_per_trace_time += gpu_time
+        all_aggregated_gpu_per_trace.append(aggregated_gpu)
+
+    # GPU Batched processing (stacked approach)
+    total_gpu_batched_time = 0
+    batched_aggregated = None
+    hypothesis_offsets = None
+    if unified_data.num_valid_traces > 0:
+        try:
+            # Get stacked data for batch processing
+            stacked = unified_data.get_stacked_tensors()
+            if stacked:
+                # Create stacked indices and evidence for all traces
+                stacked_test_indices = []
+                stacked_new_evidence = []
+                update_offsets = [0]
+
+                offset = 0
+                for i, (indices, evidence) in enumerate(zip(all_test_indices, all_new_evidence)):
+                    # Adjust indices to global hypothesis indexing
+                    global_indices = indices + stacked["hyp_offsets"][i]
+                    stacked_test_indices.extend(global_indices)
+                    stacked_new_evidence.extend(evidence)
+                    offset += len(evidence)
+                    update_offsets.append(offset)
+
+                stacked_test_indices_gpu = torch.tensor(stacked_test_indices, dtype=torch.int64, device=operations.device)
+                stacked_new_evidence_gpu = torch.tensor(stacked_new_evidence, dtype=torch.float32, device=operations.device)
+                update_offsets_gpu = torch.tensor(update_offsets, dtype=torch.int32, device=operations.device)
+
+                start_time = time.perf_counter()
+                # Call stacked kernel
+                batched_aggregated = monty_cuda.evidence_aggregation_stacked(
+                    stacked["evidence"], stacked_new_evidence_gpu, stacked_test_indices_gpu,
+                    stacked["hyp_offsets"], update_offsets_gpu,
+                    min_update, past_weight, present_weight
+                )
+
+                if operations.device.type == "cuda":
+                    torch.cuda.synchronize()
+                total_gpu_batched_time = time.perf_counter() - start_time
+
+                # Get hypothesis offsets for result splitting
+                hypothesis_offsets = stacked["hyp_offsets"]
+
+        except Exception as e:
+            print(f"    Batched GPU failed: {e}")
+            total_gpu_batched_time = 0
+
+    if not all_aggregated_cpu:
+        print("    No evidence aggregation data found")
+        return False
+
+    # Store results and timing
+    unified_data.cpu_times["evidence_aggregation"] = total_cpu_time
+    unified_data.gpu_per_trace_times["evidence_aggregation"] = total_gpu_per_trace_time
+    unified_data.gpu_batched_times["evidence_aggregation"] = total_gpu_batched_time
+
+    # Verify results
+    max_diff = 0
+    max_batched_diff = 0
+    for i in range(len(all_aggregated_cpu)):
+        cpu_result = all_aggregated_cpu[i]
+        gpu_result = all_aggregated_gpu_per_trace[i].cpu().numpy()
+
+        # Per-trace verification
+        trace_diff = np.max(np.abs(cpu_result - gpu_result))
+        max_diff = max(max_diff, trace_diff)
+
+        # Batched verification if available
+        if batched_aggregated is not None and hypothesis_offsets is not None:
+            gpu_batched_result = batched_aggregated[hypothesis_offsets[i]:hypothesis_offsets[i+1]]
+            gpu_batched_result_np = gpu_batched_result.cpu().numpy()
+            batched_trace_diff = np.max(np.abs(cpu_result - gpu_batched_result_np))
+            max_batched_diff = max(max_batched_diff, batched_trace_diff)
+
+    unified_data.verification_results["evidence_aggregation"] = {
+        "max_diff": max_diff,
+        "max_batched_diff": max_batched_diff,
+        "passed": max_diff < 1e-5
+    }
+
+    # Print timing comparison
+    print(f"    CPU: {total_cpu_time * 1000:.3f}ms")
+    print(f"    GPU Per-Trace: {total_gpu_per_trace_time * 1000:.3f}ms")
+    print(f"    GPU Batched: {total_gpu_batched_time * 1000:.3f}ms")
+    if total_cpu_time > 0:
+        per_trace_speedup = total_cpu_time / total_gpu_per_trace_time if total_gpu_per_trace_time > 0 else 0
+        batched_speedup = total_cpu_time / total_gpu_batched_time if total_gpu_batched_time > 0 else 0
+        print(f"    Per-Trace Speedup: {per_trace_speedup:.2f}x, Batched Speedup: {batched_speedup:.2f}x")
+    print(f"    Per-trace max diff: {max_diff:.2e}, Batched max diff: {max_batched_diff:.2e}")
+
+    return True
+
+
 def process_knn_search(traces: List[Dict], operations: MontyOperations,
                       unified_data: UnifiedStepData) -> bool:
     """Process KNN search."""
@@ -1923,7 +2383,7 @@ def main():
         print("Testing all functions")
 
     # results = run_step_analysis(traces, operations, args.function)
-    results = run_step_analysis(traces, operations, args.function)
+    # results = run_step_analysis(traces, operations, args.function)
     results = run_step_analysis(traces, operations, args.function)
 
     # Print comprehensive final summary
