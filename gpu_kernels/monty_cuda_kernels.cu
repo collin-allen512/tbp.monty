@@ -884,8 +884,6 @@ torch::Tensor evidence_aggregation_stacked(
     torch::Tensor new_evidence,     // (total_hyp,)
     torch::Tensor evidence_update_thresholds,     // (total_hyp,)
     torch::Tensor min_updates,     // (total_hyp,)
-    torch::Tensor trace_offsets,    // (num_traces,) - hypothesis offsets per trace
-    torch::Tensor update_offsets,   // (num_traces,) - update offsets per trace
     float past_weight,
     float present_weight) {
 

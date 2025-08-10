@@ -229,6 +229,25 @@ class ProfiledHypothesesDisplacer(DefaultHypothesesDisplacer):
             time_agg = time.perf_counter() - start_agg
 
             self.timing_data["evidence_aggregation"].append(time_agg)
+
+            # Capture evidence aggregation trace data if enabled
+            if self.save_computation_trace and 'evidence_intermediates' in locals():
+                evidence_intermediates["evidence_aggregation"] = {
+                    "inputs": {
+                        "old_evidence": possible_hypotheses.evidence.copy(),
+                        "new_evidence": new_evidence.copy(),
+                        "evidence_to_add": evidence_to_add.copy(),
+                        "hyp_ids_to_test": hyp_ids_to_test.copy(),
+                        "evidence_update_threshold": evidence_update_threshold.copy(),
+                        "min_update": min_update,
+                        "past_weight": self.past_weight,
+                        "present_weight": self.present_weight,
+                    },
+                    "outputs": {
+                        "aggregated_evidence": evidence.copy(),
+                    },
+                    "timing": time_agg,
+                }
         else:
             evidence = possible_hypotheses.evidence
 

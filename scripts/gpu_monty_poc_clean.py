@@ -136,6 +136,7 @@ class UnifiedStepData:
                     evidence_data = trace["evidence_intermediates"]["evidence_aggregation"]
                     per_trace_item["old_evidence"] = evidence_data["inputs"]["old_evidence"]
                     per_trace_item['new_evidence'] = evidence_data["inputs"]["new_evidence"]
+                    per_trace_item['current_evidence'] = evidence_data["inputs"]["evidence_to_add"]
                     per_trace_item['hyp_ids_to_test'] = evidence_data["inputs"]["hyp_ids_to_test"]
                     per_trace_item['evidence_update_threshold'] = evidence_data["inputs"]["evidence_update_threshold"]
                     per_trace_item['min_update'] = evidence_data["inputs"]["min_update"]
@@ -180,9 +181,9 @@ class UnifiedStepData:
         stacked_hyp_test_ids = []
         stacked_old_evidence = []
         stacked_new_evidence = []
+        stacked_current_evidence = []
         stacked_min_update = []
         evidence_update_offsets = [0]
-
 
         for item in self.per_trace_data:
             all_poses.append(item["poses"])
@@ -211,7 +212,8 @@ class UnifiedStepData:
             if 'old_evidence' in item:
                 stacked_old_evidence.append(item['old_evidence'])
                 stacked_new_evidence.append(item['new_evidence'])
-                evidence_length = item['new_evidence'].shape[0]
+                stacked_current_evidence.append(item['current_evidence'])
+                evidence_length = item['current_evidence'].shape[0]
                 stacked_evidence_update_threshold.append(np.repeat(item['evidence_update_threshold'], evidence_length))
                 stacked_min_update.append(np.repeat(item['min_update'], evidence_length))
                 stacked_hyp_test_ids.append(item['hyp_ids_to_test'])
@@ -243,9 +245,10 @@ class UnifiedStepData:
             "pose_vectors": torch.from_numpy(np.concatenate(all_pose_vectors)).float().to(self.device),
             "old_evidence": torch.from_numpy(np.concatenate(stacked_old_evidence)).float().to(self.device),
             "new_evidence": torch.from_numpy(np.concatenate(stacked_new_evidence)).float().to(self.device),
+            "current_evidence": torch.from_numpy(np.concatenate(stacked_current_evidence)).float().to(self.device),
             "evidence_update_thresholds": torch.from_numpy(np.concatenate(stacked_evidence_update_threshold)).float().to(self.device),
             "hyp_test_ids": torch.from_numpy(np.concatenate(stacked_hyp_test_ids)).float().to(self.device),
-            "min_update": torch.from_numpy(np.concatenate(stacked_min_update)).float().to(self.device),
+            "min_updates": torch.from_numpy(np.concatenate(stacked_min_update)).float().to(self.device),
             "update_offsets": torch.tensor(evidence_update_offsets, dtype=torch.int32, device=self.device),
         }
 
@@ -929,12 +932,12 @@ class MontyOperations:
         start_time = time.perf_counter()
 
         stacked_old_evidence = stacked['old_evidence']
-        stacked_new_evidence = stacked['new_evidence']
+        stacked_current_evidence = stacked['current_evidence']
         evidence_update_thresholds = stacked['evidence_update_thresholds']
         min_updates = stacked['min_updates']
         # Call stacked kernel
         aggregated_evidence = monty_cuda.evidence_aggregation_stacked(
-            stacked_old_evidence, stacked_new_evidence, evidence_update_thresholds,
+            stacked_old_evidence, stacked_current_evidence, evidence_update_thresholds,
             min_updates, past_weight, present_weight
         )
 
@@ -2014,24 +2017,28 @@ def process_evidence_aggregation_all_approaches(unified_data: UnifiedStepData,
         # all_old_evidence.append(old_evidence)
         old_evidence = trace_data['old_evidence']
         new_evidence = trace_data['new_evidence']
+        current_evidence = trace_data['current_evidence']
         min_update = trace_data['min_update']
         hyp_ids_to_test = trace_data['hyp_ids_to_test']
         evidence_update_threshold = trace_data['evidence_update_threshold']
+
         # CPU version
         aggregated_cpu, cpu_time = operations.evidence_aggregation_cpu(
             old_evidence, new_evidence, hyp_ids_to_test,
             min_update, past_weight, present_weight
         )
+
         total_cpu_time += cpu_time
         all_aggregated_cpu.append(aggregated_cpu)
 
         # GPU Per-Trace version
         old_evidence_gpu = torch.from_numpy(old_evidence).to(operations.device)
-        new_evidence_gpu = torch.from_numpy(new_evidence).to(operations.device)
+        # new_evidence_gpu = torch.from_numpy(new_evidence).to(operations.device)
+        current_evidence_gpu = torch.from_numpy(current_evidence).to(operations.device)
         # test_indices_gpu = torch.from_numpy(test_indices.astype(np.int64)).to(operations.device)
 
         aggregated_gpu, gpu_time = operations.evidence_aggregation_gpu(
-            old_evidence_gpu, new_evidence_gpu, evidence_update_threshold,
+            old_evidence_gpu, current_evidence_gpu, evidence_update_threshold,
             min_update, past_weight, present_weight
         )
         total_gpu_per_trace_time += gpu_time
@@ -2040,7 +2047,6 @@ def process_evidence_aggregation_all_approaches(unified_data: UnifiedStepData,
     # GPU Batched processing (stacked approach)
     total_gpu_batched_time = 0
     batched_aggregated = None
-    hypothesis_offsets = None
     if unified_data.num_valid_traces > 0:
         try:
             batched_aggregated, update_offsets, total_gpu_batched_time = operations.evidence_aggregation_gpu_batched(
@@ -2055,12 +2061,10 @@ def process_evidence_aggregation_all_approaches(unified_data: UnifiedStepData,
     if not all_aggregated_cpu:
         print("    No evidence aggregation data found")
         return False
-
     # Store results and timing
     unified_data.cpu_times["evidence_aggregation"] = total_cpu_time
     unified_data.gpu_per_trace_times["evidence_aggregation"] = total_gpu_per_trace_time
     unified_data.gpu_batched_times["evidence_aggregation"] = total_gpu_batched_time
-
     # Verify results
     max_diff = 0
     max_batched_diff = 0
@@ -2074,11 +2078,10 @@ def process_evidence_aggregation_all_approaches(unified_data: UnifiedStepData,
 
         # Batched verification if available
         if batched_aggregated is not None and update_offsets is not None:
-            gpu_batched_result = batched_aggregated[update_offsets[i]:hypothesis_offsets[i+1]]
+            gpu_batched_result = batched_aggregated[update_offsets[i]:update_offsets[i+1]]
             gpu_batched_result_np = gpu_batched_result.cpu().numpy()
             batched_trace_diff = np.max(np.abs(cpu_result - gpu_batched_result_np))
             max_batched_diff = max(max_batched_diff, batched_trace_diff)
-
     unified_data.verification_results["evidence_aggregation"] = {
         "max_diff": max_diff,
         "max_batched_diff": max_batched_diff,
