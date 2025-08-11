@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
-"""
-GPU Proof of Concept for Monty - Clean Implementation
+"""GPU Proof of Concept for Monty - Clean Implementation
 
 Clean implementation that tests GPU kernels against CPU implementations.
 Each Monty operation has exactly one GPU and one CPU implementation.
@@ -21,20 +20,20 @@ Usage:
 """
 
 import argparse
+import gc
+import os
 import pickle
+import sys
 import time
 from pathlib import Path
-from typing import Dict, Any, List, Tuple, Optional
-import sys
-import os
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
 from scipy.spatial import cKDTree
-import gc
 
 # Add gpu_kernels to path
-gpu_kernels_dir = os.path.join(os.path.dirname(__file__), '../gpu_kernels')
+gpu_kernels_dir = os.path.join(os.path.dirname(__file__), "../gpu_kernels")
 sys.path.insert(0, gpu_kernels_dir)
 
 try:
@@ -120,7 +119,7 @@ class UnifiedStepData:
                     pose_data = trace["evidence_intermediates"]["pose_transformation"]
                     per_trace_item["channel_possible_poses"] = pose_data["inputs"]["channel_possible_poses"]
                     per_trace_item["channel_features"] = pose_data["inputs"]["channel_features"]
-                    per_trace_item["pose_vectors"] = pose_data["inputs"]["channel_features"]['pose_vectors']
+                    per_trace_item["pose_vectors"] = pose_data["inputs"]["channel_features"]["pose_vectors"]
 
                 # Add KNN search data
                 if ("nearest_neighbor_search" in trace["evidence_intermediates"]):
@@ -163,13 +162,13 @@ class UnifiedStepData:
                 if ("evidence_aggregation" in trace["evidence_intermediates"]):
                     evidence_data = trace["evidence_intermediates"]["evidence_aggregation"]
                     per_trace_item["old_evidence"] = evidence_data["inputs"]["old_evidence"]
-                    per_trace_item['new_evidence'] = evidence_data["inputs"]["new_evidence"]
-                    per_trace_item['current_evidence'] = evidence_data["inputs"]["evidence_to_add"]
-                    per_trace_item['hyp_ids_to_test'] = evidence_data["inputs"]["hyp_ids_to_test"]
-                    per_trace_item['evidence_update_threshold'] = evidence_data["inputs"]["evidence_update_threshold"]
-                    per_trace_item['min_update'] = evidence_data["inputs"]["min_update"]
-                    per_trace_item['past_weight'] = evidence_data["inputs"]["past_weight"]
-                    per_trace_item['present_weight'] = evidence_data["inputs"]["present_weight"]
+                    per_trace_item["new_evidence"] = evidence_data["inputs"]["new_evidence"]
+                    per_trace_item["current_evidence"] = evidence_data["inputs"]["evidence_to_add"]
+                    per_trace_item["hyp_ids_to_test"] = evidence_data["inputs"]["hyp_ids_to_test"]
+                    per_trace_item["evidence_update_threshold"] = evidence_data["inputs"]["evidence_update_threshold"]
+                    per_trace_item["min_update"] = evidence_data["inputs"]["min_update"]
+                    per_trace_item["past_weight"] = evidence_data["inputs"]["past_weight"]
+                    per_trace_item["present_weight"] = evidence_data["inputs"]["present_weight"]
 
             self.per_trace_data.append(per_trace_item)
 
@@ -243,27 +242,27 @@ class UnifiedStepData:
                 # print(item["max_abs_curvature"])
                 all_curvatures.append(item["max_abs_curvature"])
                 distance_offsets.append(distance_offsets[-1] + len(item["search_locations"]))
-            if 'old_evidence' in item:
-                stacked_old_evidence.append(item['old_evidence'])
-                stacked_new_evidence.append(item['new_evidence'])
-                stacked_current_evidence.append(item['current_evidence'])
-                evidence_length = item['current_evidence'].shape[0]
-                stacked_evidence_update_threshold.append(np.repeat(item['evidence_update_threshold'], evidence_length))
-                stacked_min_update.append(np.repeat(item['min_update'], evidence_length))
-                stacked_hyp_test_ids.append(item['hyp_ids_to_test'])
+            if "old_evidence" in item:
+                stacked_old_evidence.append(item["old_evidence"])
+                stacked_new_evidence.append(item["new_evidence"])
+                stacked_current_evidence.append(item["current_evidence"])
+                evidence_length = item["current_evidence"].shape[0]
+                stacked_evidence_update_threshold.append(np.repeat(item["evidence_update_threshold"], evidence_length))
+                stacked_min_update.append(np.repeat(item["min_update"], evidence_length))
+                stacked_hyp_test_ids.append(item["hyp_ids_to_test"])
                 evidence_update_offsets.append(evidence_update_offsets[-1] + evidence_length)
 
             # Add pose evidence data
-            if 'query_pose_vectors' in item and 'node_pose_vectors' in item:
-                all_query_pose_vectors.append(item['query_pose_vectors'])
-                all_node_pose_vectors.append(item['node_pose_vectors'])
-                all_use_cd_masks.append(item['use_cd'])
-                pose_evidence_offsets.append(pose_evidence_offsets[-1] + len(item['query_pose_vectors']))
+            if "query_pose_vectors" in item and "node_pose_vectors" in item:
+                all_query_pose_vectors.append(item["query_pose_vectors"])
+                all_node_pose_vectors.append(item["node_pose_vectors"])
+                all_use_cd_masks.append(item["use_cd"])
+                pose_evidence_offsets.append(pose_evidence_offsets[-1] + len(item["query_pose_vectors"]))
 
             # Add final aggregation data
-            if 'radius_evidence' in item:
-                all_radius_evidence.append(item['radius_evidence'])
-                final_agg_offsets.append(final_agg_offsets[-1] + item['radius_evidence'].shape[0])
+            if "radius_evidence" in item:
+                all_radius_evidence.append(item["radius_evidence"])
+                final_agg_offsets.append(final_agg_offsets[-1] + item["radius_evidence"].shape[0])
 
         # Stack into GPU tensors
         self.stacked_data = {
@@ -319,8 +318,8 @@ class UnifiedStepData:
                 self.stacked_data = None
 
             # Cleanup intermediate results
-            for attr in ['search_locations', 'nearest_indices', 'nearest_locations',
-                        'custom_distances', 'pose_evidence', 'final_evidence']:
+            for attr in ["search_locations", "nearest_indices", "nearest_locations",
+                        "custom_distances", "pose_evidence", "final_evidence"]:
                 if hasattr(self, attr) and getattr(self, attr) is not None:
                     val = getattr(self, attr)
                     if isinstance(val, list):
@@ -444,7 +443,6 @@ class MontyOperations:
                       graph_locations: np.ndarray,
                       k: int = 3) -> Tuple[np.ndarray, float]:
         """CPU implementation using cKDTree (matches Monty)."""
-
         tree = cKDTree(graph_locations)
         start_time = time.perf_counter()
         _, nearest_indices = tree.query(search_locations, k=k)
@@ -483,7 +481,7 @@ class MontyOperations:
             torch.cuda.synchronize()
         gpu_time = time.perf_counter() - start_time
 
-        return nearest_indices, stacked['hyp_offsets'], gpu_time
+        return nearest_indices, stacked["hyp_offsets"], gpu_time
 
     # =================================================================
     # DISTANCE CALCULATION OPERATIONS
@@ -549,10 +547,10 @@ class MontyOperations:
         stacked = unified_data.get_stacked_tensors()
         if not stacked:
             return None, 0.0
-        search_locations = stacked['search_locations']
-        nearest_locations = stacked['nearest_locations']
-        pose_normals = stacked['pose_normals']
-        curvatures = stacked['curvatures']
+        search_locations = stacked["search_locations"]
+        nearest_locations = stacked["nearest_locations"]
+        pose_normals = stacked["pose_normals"]
+        curvatures = stacked["curvatures"]
         trace_offsets = stacked["distance_offsets"]
 
         start_time = time.perf_counter()
@@ -610,7 +608,6 @@ class MontyOperations:
                          query_poses_full_defined: bool,
                          weights: np.ndarray) -> Tuple[np.ndarray, float]:
         """CPU implementation matching Monty's pose evidence calculation."""
-
         query_normals = query_poses[:, 0]  # Take first pose vector
         node_normals = node_poses[:, :, :3]
 
@@ -765,9 +762,9 @@ class MontyOperations:
             raise RuntimeError("CUDA kernels not available")
 
         stacked = unified_data.get_stacked_tensors()
-        pose_vectors_gpu = stacked['pose_vectors'].contiguous()
-        channel_poses_gpu = stacked['channel_poses'].contiguous()
-        pose_offsets_gpu = stacked['pose_offsets'].contiguous()
+        pose_vectors_gpu = stacked["pose_vectors"].contiguous()
+        channel_poses_gpu = stacked["channel_poses"].contiguous()
+        pose_offsets_gpu = stacked["pose_offsets"].contiguous()
 
         start_time = time.perf_counter()
 
@@ -836,10 +833,10 @@ class MontyOperations:
 
         start_time = time.perf_counter()
 
-        stacked_old_evidence = stacked['old_evidence']
-        stacked_current_evidence = stacked['current_evidence']
-        evidence_update_thresholds = stacked['evidence_update_thresholds']
-        min_updates = stacked['min_updates']
+        stacked_old_evidence = stacked["old_evidence"]
+        stacked_current_evidence = stacked["current_evidence"]
+        evidence_update_thresholds = stacked["evidence_update_thresholds"]
+        min_updates = stacked["min_updates"]
         # Call stacked kernel
         aggregated_evidence = monty_cuda.evidence_aggregation_stacked(
             stacked_old_evidence, stacked_current_evidence, evidence_update_thresholds,
@@ -903,7 +900,6 @@ class MontyOperations:
 def run_step_analysis(traces: List[Dict], operations: MontyOperations,
                      target_function: Optional[str] = None) -> Dict[str, Any]:
     """Run per-step analysis comparing CPU, GPU Per-Trace, and GPU Batched."""
-
     # Group traces by step for all hypotheses that can run in parallel
     traces_by_step = {}
     for trace in traces:
@@ -1001,7 +997,6 @@ def run_step_analysis(traces: List[Dict], operations: MontyOperations,
 def process_function_all_approaches(func_name: str, unified_data: UnifiedStepData,
                                    operations: MontyOperations) -> bool:
     """Process a single function with CPU, GPU per-trace, and GPU batched implementations."""
-
     print(f"  Testing {func_name}...")
 
     try:
@@ -1031,7 +1026,6 @@ def process_function_all_approaches(func_name: str, unified_data: UnifiedStepDat
 def process_displacement_all_approaches(unified_data: UnifiedStepData,
                                        operations: MontyOperations) -> bool:
     """Process displacement with CPU, GPU per-trace, and GPU batched approaches."""
-
     all_search_locations_cpu = []
     all_search_locations_gpu_per_trace = []
     total_cpu_time = 0
@@ -1039,9 +1033,9 @@ def process_displacement_all_approaches(unified_data: UnifiedStepData,
 
     for i in range(unified_data.num_valid_traces):
         trace_data = unified_data.get_per_trace_item(i)
-        poses = trace_data['poses']
-        locations = trace_data['locations']
-        displacement = trace_data['displacement']
+        poses = trace_data["poses"]
+        locations = trace_data["locations"]
+        displacement = trace_data["displacement"]
 
         # CPU implementation
         search_locations_cpu, cpu_time = operations.displacement_cpu(
@@ -1130,8 +1124,8 @@ def process_knn_search_all_approaches(unified_data: UnifiedStepData,
     for i in range(unified_data.num_valid_traces):
         trace_data = unified_data.get_per_trace_item(i)
 
-        graph_locations = trace_data['graph_locations']
-        search_locations = trace_data['search_locations']
+        graph_locations = trace_data["graph_locations"]
+        search_locations = trace_data["search_locations"]
 
         # CPU implementation
         nearest_indices_cpu, cpu_time = operations.knn_search_cpu(
@@ -1220,14 +1214,14 @@ def process_distance_calculation_all_approaches(unified_data: UnifiedStepData,
     # Use trace data directly
     for i in range(unified_data.num_valid_traces):
         trace_data = unified_data.get_per_trace_item(i)
-        if ('search_locations' not in trace_data or 'nearest_node_locs' not in trace_data or
-            'pose_normals' not in trace_data or 'max_abs_curvature' not in trace_data):
+        if ("search_locations" not in trace_data or "nearest_node_locs" not in trace_data or
+            "pose_normals" not in trace_data or "max_abs_curvature" not in trace_data):
             continue
 
-        search_locs_cpu = trace_data['search_locations']
-        nearest_locs_cpu = trace_data['nearest_node_locs']
-        pose_normals_cpu = trace_data['pose_normals']
-        curvature = trace_data['max_abs_curvature']
+        search_locs_cpu = trace_data["search_locations"]
+        nearest_locs_cpu = trace_data["nearest_node_locs"]
+        pose_normals_cpu = trace_data["pose_normals"]
+        curvature = trace_data["max_abs_curvature"]
 
         # CPU implementation
         custom_distances_cpu, cpu_time = operations.distance_calculation_cpu(
@@ -1317,14 +1311,14 @@ def process_pose_evidence_all_approaches(unified_data: UnifiedStepData,
 
     for i in range(unified_data.num_valid_traces):
         trace_data = unified_data.get_per_trace_item(i)
-        if ('query_pose_vectors' not in trace_data or 'node_pose_vectors' not in trace_data):
+        if ("query_pose_vectors" not in trace_data or "node_pose_vectors" not in trace_data):
             continue
 
-        query_pose_vectors = trace_data['query_pose_vectors']
-        node_pose_vectors = trace_data['node_pose_vectors']
-        query_poses_fully_defined = trace_data['query_poses_fully_defined']
+        query_pose_vectors = trace_data["query_pose_vectors"]
+        node_pose_vectors = trace_data["node_pose_vectors"]
+        query_poses_fully_defined = trace_data["query_poses_fully_defined"]
         # Get additional data if available
-        use_cd = trace_data['use_cd']
+        use_cd = trace_data["use_cd"]
 
         # CPU implementation
         pose_evidence_cpu, cpu_time = operations.pose_evidence_cpu(
@@ -1417,7 +1411,7 @@ def process_final_aggregation_all_approaches(unified_data: UnifiedStepData,
     for i in range(unified_data.num_valid_traces):
         trace_data = unified_data.get_per_trace_item(i)
 
-        radius_evidence = trace_data['radius_evidence']
+        radius_evidence = trace_data["radius_evidence"]
 
         # CPU implementation
         final_evidence_cpu, cpu_time = operations.final_aggregation_cpu(radius_evidence)
@@ -1494,7 +1488,6 @@ def process_final_aggregation_all_approaches(unified_data: UnifiedStepData,
 def process_pose_transformation_all_approaches(unified_data: UnifiedStepData,
                                               operations: MontyOperations) -> bool:
     """Process pose transformation with CPU, GPU per-trace, and GPU batched approaches."""
-
     # CPU and GPU Per-Trace processing
     all_transformed_cpu = []
     all_transformed_gpu_per_trace = []
@@ -1504,8 +1497,8 @@ def process_pose_transformation_all_approaches(unified_data: UnifiedStepData,
     # for trace in unified_data.step_traces:
     for i in range(unified_data.num_valid_traces):
         trace_data = unified_data.get_per_trace_item(i)
-        channel_poses = trace_data['channel_possible_poses']
-        pose_vectors = trace_data['pose_vectors']
+        channel_poses = trace_data["channel_possible_poses"]
+        pose_vectors = trace_data["pose_vectors"]
 
         # CPU implementation
         transformed_cpu, cpu_time = operations.pose_transformation_cpu(
@@ -1579,7 +1572,6 @@ def process_pose_transformation_all_approaches(unified_data: UnifiedStepData,
 def process_evidence_aggregation_all_approaches(unified_data: UnifiedStepData,
                                                operations: MontyOperations) -> bool:
     """Process evidence aggregation with CPU, GPU per-trace, and GPU batched approaches."""
-
     # CPU and GPU Per-Trace processing
     all_aggregated_cpu = []
     all_aggregated_gpu_per_trace = []
@@ -1591,12 +1583,12 @@ def process_evidence_aggregation_all_approaches(unified_data: UnifiedStepData,
 
     for i in range(unified_data.num_valid_traces):
         trace_data = unified_data.get_per_trace_item(i)
-        old_evidence = trace_data['old_evidence']
-        new_evidence = trace_data['new_evidence']
-        current_evidence = trace_data['current_evidence']
-        min_update = trace_data['min_update']
-        hyp_ids_to_test = trace_data['hyp_ids_to_test']
-        evidence_update_threshold = trace_data['evidence_update_threshold']
+        old_evidence = trace_data["old_evidence"]
+        new_evidence = trace_data["new_evidence"]
+        current_evidence = trace_data["current_evidence"]
+        min_update = trace_data["min_update"]
+        hyp_ids_to_test = trace_data["hyp_ids_to_test"]
+        evidence_update_threshold = trace_data["evidence_update_threshold"]
 
         # CPU implementation
         aggregated_cpu, cpu_time = operations.evidence_aggregation_cpu(
@@ -1722,10 +1714,10 @@ def main():
     print(f"GPU Batched Time:     {results['total_gpu_batched_time'] * 1000:.3f}ms")
 
     # Calculate and display speedups
-    if results['total_cpu_time'] > 0:
-        per_trace_speedup = results['total_cpu_time'] / results['total_gpu_per_trace_time'] if results['total_gpu_per_trace_time'] > 0 else 0
-        batched_speedup = results['total_cpu_time'] / results['total_gpu_batched_time'] if results['total_gpu_batched_time'] > 0 else 0
-        batch_vs_pertrace = results['total_gpu_per_trace_time'] / results['total_gpu_batched_time'] if results['total_gpu_batched_time'] > 0 else 0
+    if results["total_cpu_time"] > 0:
+        per_trace_speedup = results["total_cpu_time"] / results["total_gpu_per_trace_time"] if results["total_gpu_per_trace_time"] > 0 else 0
+        batched_speedup = results["total_cpu_time"] / results["total_gpu_batched_time"] if results["total_gpu_batched_time"] > 0 else 0
+        batch_vs_pertrace = results["total_gpu_per_trace_time"] / results["total_gpu_batched_time"] if results["total_gpu_batched_time"] > 0 else 0
 
         print(f"\n--- SPEEDUP ANALYSIS ---")
         print(f"GPU Per-Trace vs CPU:     {per_trace_speedup:.2f}x")
@@ -1735,9 +1727,9 @@ def main():
     # Print verification summary
     print(f"\n=== VERIFICATION SUMMARY ===")
     all_passed = True
-    for step_result in results['step_results']:
-        for func_name, verification in step_result['verification_results'].items():
-            if not verification.get('passed', False):
+    for step_result in results["step_results"]:
+        for func_name, verification in step_result["verification_results"].items():
+            if not verification.get("passed", False):
                 all_passed = False
                 print(f"❌ {func_name}: FAILED verification")
 
@@ -1745,10 +1737,10 @@ def main():
         print("✅ All functions passed verification")
 
     print("\n=== KEY INSIGHTS ===")
-    if results['total_gpu_batched_time'] > 0 and batch_vs_pertrace > 1.0:
+    if results["total_gpu_batched_time"] > 0 and batch_vs_pertrace > 1.0:
         print(f"🚀 Single-dispatch batched GPU processing is {batch_vs_pertrace:.1f}x faster than per-trace GPU")
         print("   This demonstrates the benefit of processing all traces in one kernel call")
-    elif results['total_gpu_batched_time'] > 0:
+    elif results["total_gpu_batched_time"] > 0:
         print("⚠ Batched GPU processing not yet fully optimized (currently only displacement)")
     else:
         print("⚠ Batched GPU processing needs implementation for remaining functions")
