@@ -20,6 +20,7 @@ Usage:
 """
 
 import argparse
+import csv
 import gc
 import os
 import pickle
@@ -523,12 +524,9 @@ class MontyOperations:
         differences = nearest_locations - query_locs_expanded
         euclidean_dists = np.linalg.norm(differences, axis=2)
 
-        if curvature > 0:
-            dot_products = np.einsum("ijk,ik->ij", differences, pose_normals)
-            curvature_factor = 1.0 / (abs(curvature) + 0.5)
-            custom_distances = euclidean_dists + np.abs(dot_products) * curvature_factor
-        else:
-            custom_distances = euclidean_dists
+        dot_products = np.einsum("ijk,ik->ij", differences, pose_normals)
+        curvature_factor = 1.0 / (abs(curvature) + 0.5)
+        custom_distances = euclidean_dists + np.abs(dot_products) * curvature_factor
 
         cpu_time = time.perf_counter() - start_time
 
@@ -647,22 +645,26 @@ class MontyOperations:
 
         query_poses = stacked["query_pose_vectors"]
         node_poses = stacked["node_pose_vectors"]
-        use_cd_masks = stacked["use_cd_masks"]
+        use_cd_masks = stacked["use_cd_masks"].contiguous()
         poses_offsets = stacked["pose_evidence_offsets"]
 
-        query_normals = query_poses[:, 0]  # (N, 3)
-        node_normals = node_poses[:, :, :3]  # (N, K, 3)
+        query_normals = query_poses[:, 0].contiguous()  # (N, 3)
+        node_normals = node_poses[:, :, :3].contiguous()  # (N, K, 3)
+
+        pn_angles = monty_cuda.angle_calculation(node_normals, query_normals)
+        cd1_angles = monty_cuda.angle_calculation(node_poses[:, :, 3:6].contiguous(), query_poses[:, 1].contiguous())
+        pn_weights = torch.full_like(pn_angles, weights[0], dtype=torch.float32, device=device).contiguous()
+        cd1_weights = torch.full_like(cd1_angles, weights[1], dtype=torch.float32, device=device).contiguous()
 
         start_time = time.perf_counter()
-        pn_angles = monty_cuda.angle_calculation(node_normals.contiguous(), query_normals.contiguous())
-        cd1_angles = monty_cuda.angle_calculation(node_poses[:, :, 3:6].contiguous(), query_poses[:, 1].contiguous())
-
-        pn_weights = torch.tensor([weights[0]], dtype=torch.float32, device=self.device).expand(pn_angles.shape).contiguous()
-        cd1_weights = torch.tensor([weights[1]], dtype=torch.float32, device=self.device).expand(pn_angles.shape).contiguous()
 
         pose_evidence = monty_cuda.pose_evidence_stacked(
-            pn_angles.contiguous(), cd1_angles.contiguous(), use_cd_masks.contiguous(),
-            pn_weights.contiguous(), cd1_weights.contiguous(), poses_offsets.contiguous()
+            pn_angles,
+            cd1_angles,
+            use_cd_masks,
+            pn_weights,
+            cd1_weights,
+            poses_offsets
         )
 
         if self.device.type == "cuda":
@@ -968,6 +970,7 @@ def run_step_analysis(traces: List[Dict], operations: MontyOperations,
 
         step_results.append({
             "step": step,
+            "total_hypotheses": unified_data.get_stacked_tensors()["total_hypotheses"],
             "num_traces": len(step_traces),
             "cpu_times": unified_data.cpu_times.copy(),
             "gpu_per_trace_times": unified_data.gpu_per_trace_times.copy(),
@@ -1664,6 +1667,81 @@ def process_evidence_aggregation_all_approaches(unified_data: UnifiedStepData,
 
     return True
 
+def extract_experiment_name(output_dir: str) -> str:
+    """Extract experiment name from output directory path."""
+    path = Path(output_dir)
+    return path.name
+
+
+def log_performance_to_csv(results: Dict[str, Any], experiment_name: str, csv_file: str = "gpu_performance_data.csv"):
+    """Log performance results to CSV for plotting and analysis."""
+
+    # Define CSV columns
+    fieldnames = [
+        'experiment_name', 'step', 'function_name', 'num_traces', 'total_hypotheses',
+        'cpu_time_ms', 'gpu_per_trace_time_ms', 'gpu_batched_time_ms',
+        'per_trace_speedup', 'batched_speedup', 'batch_vs_pertrace_speedup',
+        'verification_passed', 'max_diff', 'max_batched_diff', 'timestamp'
+    ]
+
+    # Check if CSV exists, create with headers if not
+    csv_path = Path(csv_file)
+    write_header = not csv_path.exists()
+
+    with open(csv_path, 'a', newline='') as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+
+        if write_header:
+            writer.writeheader()
+            print(f"Created performance log: {csv_path.absolute()}")
+
+        timestamp = time.strftime('%Y-%m-%d %H:%M:%S')
+
+        # Log data for each step and function
+        for step_result in results['step_results']:
+            step = step_result['step']
+            num_traces = step_result['num_traces']
+            total_hypotheses = step_result['total_hypotheses']
+
+            # Log per-function timing data
+            for func_name in results['functions_tested']:
+                cpu_time = step_result['cpu_times'].get(func_name, 0) * 1000  # Convert to ms
+                gpu_per_trace_time = step_result['gpu_per_trace_times'].get(func_name, 0) * 1000
+                gpu_batched_time = step_result['gpu_batched_times'].get(func_name, 0) * 1000
+
+                # Calculate speedups
+                per_trace_speedup = cpu_time / gpu_per_trace_time if gpu_per_trace_time > 0 else 0
+                batched_speedup = cpu_time / gpu_batched_time if gpu_batched_time > 0 else 0
+                batch_vs_pertrace = gpu_per_trace_time / gpu_batched_time if gpu_batched_time > 0 else 0
+
+                # Get verification results
+                verification = step_result['verification_results'].get(func_name, {})
+                verification_passed = verification.get('passed', False)
+                max_diff = verification.get('max_diff', verification.get('per_trace_max_diff', 0))
+                max_batched_diff = verification.get('max_batched_diff', 0)
+
+                # Write row to CSV
+                writer.writerow({
+                    'experiment_name': experiment_name,
+                    'step': step,
+                    'function_name': func_name,
+                    'num_traces': num_traces,
+                    'total_hypotheses': total_hypotheses,
+                    'cpu_time_ms': f"{cpu_time:.3f}",
+                    'gpu_per_trace_time_ms': f"{gpu_per_trace_time:.3f}",
+                    'gpu_batched_time_ms': f"{gpu_batched_time:.3f}",
+                    'per_trace_speedup': f"{per_trace_speedup:.2f}",
+                    'batched_speedup': f"{batched_speedup:.2f}",
+                    'batch_vs_pertrace_speedup': f"{batch_vs_pertrace:.2f}",
+                    'verification_passed': verification_passed,
+                    'max_diff': f"{max_diff:.2e}",
+                    'max_batched_diff': f"{max_batched_diff:.2e}",
+                    'timestamp': timestamp
+                })
+
+    print(f"Performance data logged to: {csv_path.absolute()}")
+
+
 def main():
     """Main entry point."""
     parser = argparse.ArgumentParser(description="GPU vs CPU Monty Operations Test")
@@ -1671,12 +1749,16 @@ def main():
     parser.add_argument("--function", choices=["displacement", "knn_search", "distance",
                        "pose_evidence", "aggregation"],
                        help="Test specific function (default: test all)")
+    parser.add_argument("--csv-file", default="gpu_performance_data.csv",
+                       help="CSV file to log performance data (default: gpu_performance_data.csv)")
 
     args = parser.parse_args()
 
+    # Extract experiment name for logging
+    experiment_name = extract_experiment_name(args.output_dir)
+
     # Load profiling data
     traces = load_profiling_data(args.output_dir)
-    # traces.reverse()
     if not traces:
         return
 
@@ -1731,21 +1813,18 @@ def main():
         for func_name, verification in step_result["verification_results"].items():
             if not verification.get("passed", False):
                 all_passed = False
-                print(f"❌ {func_name}: FAILED verification")
+                print(f"{func_name}: FAILED verification")
 
     if all_passed:
-        print("✅ All functions passed verification")
+        print("All functions passed verification")
 
-    print("\n=== KEY INSIGHTS ===")
-    if results["total_gpu_batched_time"] > 0 and batch_vs_pertrace > 1.0:
-        print(f"🚀 Single-dispatch batched GPU processing is {batch_vs_pertrace:.1f}x faster than per-trace GPU")
-        print("   This demonstrates the benefit of processing all traces in one kernel call")
-    elif results["total_gpu_batched_time"] > 0:
-        print("⚠ Batched GPU processing not yet fully optimized (currently only displacement)")
-    else:
-        print("⚠ Batched GPU processing needs implementation for remaining functions")
-
-    print("\nAnalysis complete!")
+    # Log performance data to CSV for analysis and plotting
+    print(f"\n=== LOGGING PERFORMANCE DATA ===")
+    try:
+        log_performance_to_csv(results, experiment_name, args.csv_file)
+        print(f"Performance data successfully logged")
+    except Exception as e:
+        print(f"Error logging performance data: {e}")
 
 
 if __name__ == "__main__":

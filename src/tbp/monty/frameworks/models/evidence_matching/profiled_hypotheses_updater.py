@@ -15,7 +15,7 @@ import logging
 import pickle
 import time
 from collections import defaultdict
-from typing import Literal, Type
+from typing import Literal
 
 import numpy as np
 from scipy.spatial.transform import Rotation
@@ -133,7 +133,6 @@ class ProfiledHypothesesUpdater(DefaultHypothesesUpdater):
         current_step: int
     ) -> list[ChannelHypotheses]:
         """Profiled version of hypothesis update."""
-
         start_total = time.perf_counter()
 
         # Get all usable input channels
@@ -147,10 +146,10 @@ class ProfiledHypothesesUpdater(DefaultHypothesesUpdater):
 
         # Get step number from LM buffer if available
         self.lm_id = "unknown"
-        if hasattr(self, 'learning_module') and self.learning_module is not None:
-            if hasattr(self.learning_module, 'buffer'):
+        if hasattr(self, "learning_module") and self.learning_module is not None:
+            if hasattr(self.learning_module, "buffer"):
                 step_number = len(self.learning_module.buffer)
-            if hasattr(self.learning_module, 'learning_module_id'):
+            if hasattr(self.learning_module, "learning_module_id"):
                 self.lm_id = self.learning_module.learning_module_id
         # print(f"LM {self.lm_id}")
         # exit()
@@ -269,17 +268,17 @@ class ProfiledHypothesesUpdater(DefaultHypothesesUpdater):
                 pickle.dump(self.saved_examples, f)
             logger.info(f"Saved {len(self.saved_examples)} example updates to {example_file}")
         # Save computation traces if collected
-        if self.save_computation_trace and hasattr(self.hypotheses_displacer, 'computation_traces'):
+        if self.save_computation_trace and hasattr(self.hypotheses_displacer, "computation_traces"):
             trace_file = os.path.join(output_dir, f"hypothesis_computation_trace_LM{self.lm_id}.pkl")
             traces = self.hypotheses_displacer.computation_traces
 
             # Add step timing data to traces for GPU comparison
             if self.step_timings:
                 # Match step timing to traces by step number
-                step_timing_map = {st['step']: st for st in self.step_timings}
+                step_timing_map = {st["step"]: st for st in self.step_timings}
                 for trace in traces:
-                    if trace['step'] in step_timing_map:
-                        trace['step_timing'] = step_timing_map[trace['step']]
+                    if trace["step"] in step_timing_map:
+                        trace["step_timing"] = step_timing_map[trace["step"]]
 
             with open(trace_file, "wb") as f:
                 pickle.dump(traces, f)
@@ -347,7 +346,7 @@ class ProfiledHypothesesUpdater(DefaultHypothesesUpdater):
             print(f"📊 Results saved to: {output_file}")
             if self.saved_examples:
                 print(f"💾 {len(self.saved_examples)} examples saved for GPU testing")
-            print("")
+            print()
         else:
             logger.info("No profiling data collected.")
 

@@ -92,7 +92,6 @@ class ProfiledHypothesesDisplacer(DefaultHypothesesDisplacer):
         current_step: int
     ) -> ChannelHypotheses:
         """Profiled version of hypothesis displacement and evidence computation."""
-
         start_total = time.perf_counter()
 
         # Profile displacement calculation
@@ -129,14 +128,14 @@ class ProfiledHypothesesDisplacer(DefaultHypothesesDisplacer):
             # Get step number and LM ID if available
             # step_number = 0
             lm_id = "unknown"
-            if hasattr(self, 'learning_module') and self.learning_module is not None:
+            if hasattr(self, "learning_module") and self.learning_module is not None:
                 # Use explicit step counter if available, otherwise fallback to buffer length
                 # if hasattr(self.learning_module, 'current_step'):
             #         step_number = self.learning_module.current_step
             #     # elif hasattr(self.learning_module, 'buffer'):
             #     #     step_number = len(self.learning_module.buffer)
                 # print("LM  attribute!")
-                if hasattr(self.learning_module, 'learning_module_id'):
+                if hasattr(self.learning_module, "learning_module_id"):
                     lm_id = self.learning_module.learning_module_id
                     # print(f"LM Known {lm_id}!")
             #     else:
@@ -155,7 +154,7 @@ class ProfiledHypothesesDisplacer(DefaultHypothesesDisplacer):
                 "timing": {},  # Will be populated with actual CPU timings
                 "inputs": {
                     "channel_displacement": channel_displacement.copy(),
-                    "channel_features": {k: v.copy() if hasattr(v, 'copy') else v
+                    "channel_features": {k: v.copy() if hasattr(v, "copy") else v
                                        for k, v in channel_features.items()},
                     "evidence_update_threshold": evidence_update_threshold,
                     "initial_hypotheses": {
@@ -231,7 +230,7 @@ class ProfiledHypothesesDisplacer(DefaultHypothesesDisplacer):
             self.timing_data["evidence_aggregation"].append(time_agg)
 
             # Capture evidence aggregation trace data if enabled
-            if self.save_computation_trace and 'evidence_intermediates' in locals():
+            if self.save_computation_trace and "evidence_intermediates" in locals():
                 evidence_intermediates["evidence_aggregation"] = {
                     "inputs": {
                         "old_evidence": possible_hypotheses.evidence.copy(),
@@ -255,7 +254,7 @@ class ProfiledHypothesesDisplacer(DefaultHypothesesDisplacer):
         self.timing_data["total_displace_and_compute"].append(time_total)
 
         # Complete computation trace if enabled
-        if self.save_computation_trace and 'trace' in locals() and len(self.computation_traces) < 500:
+        if self.save_computation_trace and "trace" in locals() and len(self.computation_traces) < 500:
             # Capture actual CPU timing data
             if num_hypotheses_to_test > 0:
                 trace["evidence_intermediates"] = evidence_intermediates
@@ -270,7 +269,7 @@ class ProfiledHypothesesDisplacer(DefaultHypothesesDisplacer):
                 "final_evidence": evidence.copy(),
                 "final_locations": search_locations.copy(),
             }
-            if 'new_evidence' in locals():
+            if "new_evidence" in locals():
                 trace["intermediates"]["new_evidence"] = new_evidence.copy()
                 trace["intermediates"]["hyp_ids_to_test"] = hyp_ids_to_test.copy()
             self.computation_traces.append(trace)
@@ -292,7 +291,6 @@ class ProfiledHypothesesDisplacer(DefaultHypothesesDisplacer):
         channel_features: dict,
     ):
         """Profiled version of evidence calculation with detailed intermediate capture."""
-
         logger.debug(
             f"Calculating evidence for {graph_id} using input from {input_channel}"
         )
@@ -312,12 +310,12 @@ class ProfiledHypothesesDisplacer(DefaultHypothesesDisplacer):
         if self.save_computation_trace:
             evidence_intermediates["pose_transformation"] = {
                 "inputs": {
-                    "channel_features": {k: v.copy() if hasattr(v, 'copy') else v
+                    "channel_features": {k: v.copy() if hasattr(v, "copy") else v
                                        for k, v in channel_features.items()},
                     "channel_possible_poses": channel_possible_poses.copy(),
                 },
                 "outputs": {
-                    "pose_transformed_features": {k: v.copy() if hasattr(v, 'copy') else v
+                    "pose_transformed_features": {k: v.copy() if hasattr(v, "copy") else v
                                                 for k, v in pose_transformed_features.items()},
                 },
                 "timing": time_pose_transform,
@@ -421,7 +419,7 @@ class ProfiledHypothesesDisplacer(DefaultHypothesesDisplacer):
                     "nearest_node_ids": nearest_node_ids.copy(),
                 },
                 "outputs": {
-                    "new_pos_features": {k: v.copy() if hasattr(v, 'copy') else v
+                    "new_pos_features": {k: v.copy() if hasattr(v, "copy") else v
                                        for k, v in new_pos_features.items()},
                 },
                 "timing": time_feat,
@@ -442,9 +440,9 @@ class ProfiledHypothesesDisplacer(DefaultHypothesesDisplacer):
         if self.save_computation_trace:
             evidence_intermediates["pose_evidence_calculation"] = {
                 "inputs": {
-                    "pose_transformed_features": {k: v.copy() if hasattr(v, 'copy') else v
+                    "pose_transformed_features": {k: v.copy() if hasattr(v, "copy") else v
                                                 for k, v in pose_transformed_features.items()},
-                    "new_pos_features": {k: v.copy() if hasattr(v, 'copy') else v
+                    "new_pos_features": {k: v.copy() if hasattr(v, "copy") else v
                                        for k, v in new_pos_features.items()},
                     "node_distance_weights": node_distance_weights.copy(),
                 },
@@ -484,7 +482,7 @@ class ProfiledHypothesesDisplacer(DefaultHypothesesDisplacer):
             if self.save_computation_trace:
                 evidence_intermediates["feature_evidence_calculation"] = {
                     "inputs": {
-                        "channel_features": {k: v.copy() if hasattr(v, 'copy') else v
+                        "channel_features": {k: v.copy() if hasattr(v, "copy") else v
                                            for k, v in channel_features.items()},
                         "nearest_node_ids": nearest_node_ids.copy(),
                         "mask": mask.copy(),
@@ -582,23 +580,23 @@ class ProfiledHypothesesDisplacer(DefaultHypothesesDisplacer):
         self.timing_data["total_pose_evidence"].append(time_total)
 
         # Add intermediate data to current trace if available
-        if (self.save_computation_trace and hasattr(self, 'computation_traces')):
+        if (self.save_computation_trace and hasattr(self, "computation_traces")):
             # current_trace = self.computation_traces[-1]
             # if "evidence_intermediates" in current_trace:
             pose_evidence_data = {
                 "inputs": {
-                    "query_features": {k: v.copy() if hasattr(v, 'copy') else v
+                    "query_features": {k: v.copy() if hasattr(v, "copy") else v
                                         for k, v in query_features.items()},
-                    "node_features": {k: v.copy() if hasattr(v, 'copy') else v
+                    "node_features": {k: v.copy() if hasattr(v, "copy") else v
                                     for k, v in node_features.items()},
                     "node_distance_weights": node_distance_weights.copy(),
                 },
                 "intermediates": {
                     "pn_error": pn_error.copy(),
                     "pn_evidence": pn_evidence.copy(),
-                    "cd1_evidence": cd1_evidence.copy() if 'cd1_evidence' in locals() else None,
+                    "cd1_evidence": cd1_evidence.copy() if "cd1_evidence" in locals() else None,
                     "pn_weight": pn_weight,
-                    "cd1_weight": cd1_weight if 'cd1_weight' in locals() else 0,
+                    "cd1_weight": cd1_weight if "cd1_weight" in locals() else 0,
                 },
                 "outputs": {
                     "pose_evidence_weighted": pose_evidence_weighted.copy(),
@@ -611,12 +609,12 @@ class ProfiledHypothesesDisplacer(DefaultHypothesesDisplacer):
             }
 
             # Add CD1 angle data if available
-            if 'cd1_angle' in locals() and 'use_cd' in locals():
+            if "cd1_angle" in locals() and "use_cd" in locals():
                 pose_evidence_data["intermediates"]["cd1_angle"] = cd1_angle.copy()
                 pose_evidence_data["intermediates"]["use_cd"] = use_cd.copy()
 
             # Add angle calculation inputs/outputs for GPU testing
-            if 'angle_calc_inputs' in locals():
+            if "angle_calc_inputs" in locals():
                 pose_evidence_data["angle_calculation_inputs"] = angle_calc_inputs
                 pose_evidence_data["angle_calculation_outputs"] = angle_calc_outputs
 

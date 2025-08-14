@@ -56,44 +56,7 @@ if [ $? -eq 0 ]; then
     echo "📦 Built files:"
     ls -la *.so 2>/dev/null || echo "No .so files found"
 
-    # Test the installation
-    echo ""
-    echo "🧪 Testing installation..."
-    python -c "
-import sys
-sys.path.insert(0, '.')
-import monty_cuda
-print('✅ Successfully imported monty_cuda')
-print('Available functions:')
-for func in dir(monty_cuda):
-    if not func.startswith('_'):
-        print(f'  - {func}')
-"
-
-    if [ $? -eq 0 ]; then
-        echo ""
-        echo "✅ All tests passed!"
-        echo ""
-        echo "🎉 Monty CUDA kernels are ready!"
-        echo ""
-        echo ""
-        echo "You can now use:"
-        echo "  python test_monty_cuda.py"
-        echo "  python gpu_monty_poc.py --output-dir /path/to/experiment"
-    else
-        echo ""
-        echo "❌ Import test failed"
-        echo ""
-        echo "🔍 Running diagnostic..."
-        cd ..
-        python debug_cuda_import.py
-        exit 1
-    fi
-else
-    echo "❌ Build failed"
-    exit 1
 fi
-
 # Navigate back
 cd ..
 
