@@ -153,9 +153,9 @@ class UnifiedStepData:
                     per_trace_item["use_cd"] = per_trace_item["node_poses_fully_defined"][:, :, 0] * per_trace_item["query_poses_fully_defined"]
                     per_trace_item["pose_evidence_weighted"] = pe_data["outputs"]["pose_evidence_weighted"]
 
-                # Add final aggregation data
-                if ("final_aggregation" in trace["evidence_intermediates"]):
-                    final_data = trace["evidence_intermediates"]["final_aggregation"]
+                # Add radius evidence max data
+                if ("radius_evidence_max" in trace["evidence_intermediates"]):
+                    final_data = trace["evidence_intermediates"]["radius_evidence_max"]
                     per_trace_item["radius_evidence"] = final_data["inputs"]["radius_evidence"]
                     per_trace_item["location_evidence"] = final_data["outputs"]["location_evidence"]
 
@@ -216,7 +216,7 @@ class UnifiedStepData:
         pose_evidence_offsets = [0]
         final_agg_offsets = [0]
 
-        # Final Aggregation
+        # Radius evidence max
 
 
         for item in self.per_trace_data:
@@ -260,7 +260,7 @@ class UnifiedStepData:
                 all_use_cd_masks.append(item["use_cd"])
                 pose_evidence_offsets.append(pose_evidence_offsets[-1] + len(item["query_pose_vectors"]))
 
-            # Add final aggregation data
+            # Add radius evidence max data
             if "radius_evidence" in item:
                 all_radius_evidence.append(item["radius_evidence"])
                 final_agg_offsets.append(final_agg_offsets[-1] + item["radius_evidence"].shape[0])
@@ -653,8 +653,8 @@ class MontyOperations:
 
         pn_angles = monty_cuda.angle_calculation(node_normals, query_normals)
         cd1_angles = monty_cuda.angle_calculation(node_poses[:, :, 3:6].contiguous(), query_poses[:, 1].contiguous())
-        pn_weights = torch.full_like(pn_angles, weights[0], dtype=torch.float32, device=device).contiguous()
-        cd1_weights = torch.full_like(cd1_angles, weights[1], dtype=torch.float32, device=device).contiguous()
+        pn_weights = torch.full_like(pn_angles, weights[0], dtype=torch.float32, device=self.device).contiguous()
+        cd1_weights = torch.full_like(cd1_angles, weights[1], dtype=torch.float32, device=self.device).contiguous()
 
         start_time = time.perf_counter()
 
@@ -674,17 +674,17 @@ class MontyOperations:
         return pose_evidence, gpu_time
 
     # =================================================================
-    # FINAL AGGREGATION OPERATIONS
+    # Radius evidence max OPERATIONS
     # =================================================================
 
-    def final_aggregation_gpu(self, evidence_matrix: torch.Tensor) -> Tuple[torch.Tensor, float]:
-        """GPU implementation of final evidence aggregation using CUDA kernels."""
+    def radius_evidence_max_gpu(self, evidence_matrix: torch.Tensor) -> Tuple[torch.Tensor, float]:
+        """GPU implementation of radius evidence max using CUDA kernels."""
         if monty_cuda is None:
             raise RuntimeError("CUDA kernels not available")
 
         start_time = time.perf_counter()
 
-        final_evidence = monty_cuda.final_aggregation_stacked(evidence_matrix)
+        final_evidence = monty_cuda.radius_evidence_max_stacked(evidence_matrix)
 
         if self.device.type == "cuda":
             torch.cuda.synchronize()
@@ -692,8 +692,8 @@ class MontyOperations:
 
         return final_evidence, gpu_time
 
-    def final_aggregation_cpu(self, evidence_matrix: np.ndarray) -> Tuple[np.ndarray, float]:
-        """CPU implementation of final evidence aggregation."""
+    def radius_evidence_max_cpu(self, evidence_matrix: np.ndarray) -> Tuple[np.ndarray, float]:
+        """CPU implementation of radius evidence max."""
         start_time = time.perf_counter()
 
         final_evidence = np.max(evidence_matrix, axis=1)
@@ -702,8 +702,8 @@ class MontyOperations:
 
         return final_evidence, cpu_time
 
-    def final_aggregation_gpu_batched(self, unified_data: UnifiedStepData) -> Tuple[torch.Tensor, float]:
-        """Batched GPU final aggregation - single kernel call for all traces."""
+    def radius_evidence_max_gpu_batched(self, unified_data: UnifiedStepData) -> Tuple[torch.Tensor, float]:
+        """Batched GPU radius evidence max - single kernel call for all traces."""
         if monty_cuda is None:
             raise RuntimeError("CUDA kernels not available")
 
@@ -715,7 +715,7 @@ class MontyOperations:
 
         start_time = time.perf_counter()
 
-        final_evidence = monty_cuda.final_aggregation_stacked(evidence_matrix)
+        final_evidence = monty_cuda.radius_evidence_max_stacked(evidence_matrix)
 
         if self.device.type == "cuda":
             torch.cuda.synchronize()
@@ -919,8 +919,8 @@ def run_step_analysis(traces: List[Dict], operations: MontyOperations,
         "knn_search": ["displacement", "knn_search"],
         "distance": ["displacement", "knn_search", "distance_calculation"],
         "pose_evidence": ["displacement", "knn_search", "distance_calculation", "pose_evidence"],
-        "aggregation": ["displacement", "knn_search", "distance_calculation", "pose_evidence", "final_aggregation"],
-        None: ["displacement", "pose_transformation", "evidence_aggregation", "knn_search", "distance_calculation", "pose_evidence", "final_aggregation"]
+        "aggregation": ["displacement", "knn_search", "distance_calculation", "pose_evidence", "radius_evidence_max"],
+        None: ["displacement", "pose_transformation", "evidence_aggregation", "knn_search", "distance_calculation", "pose_evidence", "radius_evidence_max"]
     }
 
     functions_to_test = function_map.get(target_function, function_map[None])
@@ -1015,8 +1015,8 @@ def process_function_all_approaches(func_name: str, unified_data: UnifiedStepDat
             return process_distance_calculation_all_approaches(unified_data, operations)
         elif func_name == "pose_evidence":
             return process_pose_evidence_all_approaches(unified_data, operations)
-        elif func_name == "final_aggregation":
-            return process_final_aggregation_all_approaches(unified_data, operations)
+        elif func_name == "radius_evidence_max":
+            return process_radius_evidence_max_all_approaches(unified_data, operations)
         else:
             print(f"    Unknown function: {func_name}")
             return False
@@ -1081,6 +1081,8 @@ def process_displacement_all_approaches(unified_data: UnifiedStepData,
     # Verify results
     max_diff = 0
     max_batched_diff = 0
+    total_per_trace_passed = 0
+    total_stacked_passed = 0
     for i in range(len(all_search_locations_cpu)):
         cpu_result = all_search_locations_cpu[i]
         gpu_result = all_search_locations_gpu_per_trace[i].cpu().numpy()
@@ -1095,11 +1097,19 @@ def process_displacement_all_approaches(unified_data: UnifiedStepData,
         batched_trace_diff = np.max(np.abs(cpu_result - gpu_batched_result_np))
         max_batched_diff = max(max_batched_diff, batched_trace_diff)
 
+        if max_diff < 1e-5:
+            total_per_trace_passed += 1
+        if max_batched_diff < 1e-5:
+            total_stacked_passed += 1
+
     unified_data.verification_results["displacement"] = {
         "max_diff": max_diff,
         "max_batched_diff": max_batched_diff,
+        "percent_per_trace_passed": 100 * total_per_trace_passed / len(all_search_locations_cpu),
+        "percent_stacked_passed": 100 * total_stacked_passed / len(all_search_locations_cpu),
         "passed": max_diff < 1e-5
     }
+    # print(f"passed {}")
 
     # Print timing comparison
     print(f"    CPU: {total_cpu_time * 1000:.3f}ms")
@@ -1172,6 +1182,8 @@ def process_knn_search_all_approaches(unified_data: UnifiedStepData,
     # Verify results
     max_diff = 0
     max_batched_diff = 0
+    total_per_trace_passed = 0
+    total_stacked_passed = 0
     for i in range(len(all_nearest_indices_cpu)):
         cpu_result = all_nearest_indices_cpu[i]
         gpu_result = all_nearest_indices_gpu_per_trace[i].cpu().numpy()
@@ -1185,12 +1197,19 @@ def process_knn_search_all_approaches(unified_data: UnifiedStepData,
         gpu_batched_result_np = gpu_batched_result.cpu().numpy()
         batched_trace_diff = np.max(np.abs(cpu_result - gpu_batched_result_np))
         max_batched_diff = max(max_batched_diff, batched_trace_diff)
+        if max_diff < 1e-5:
+            total_per_trace_passed += 1
+        if max_batched_diff < 1e-5:
+            total_stacked_passed += 1
 
     unified_data.verification_results["knn_search"] = {
         "max_diff": max_diff,
         "max_batched_diff": max_batched_diff,
+        "percent_per_trace_passed": 100 * total_per_trace_passed / len(all_nearest_indices_cpu),
+        "percent_stacked_passed": 100 * total_stacked_passed / len(all_nearest_indices_cpu),
         "passed": max_diff < 1e-5
     }
+
 
     # Print timing comparison
     print(f"    CPU: {total_cpu_time * 1000:.3f}ms")
@@ -1234,9 +1253,9 @@ def process_distance_calculation_all_approaches(unified_data: UnifiedStepData,
         all_distances_cpu.append(custom_distances_cpu)
 
         # GPU Per-Trace version
-        search_locs_gpu = torch.from_numpy(search_locs_cpu.astype(np.float32)).to(operations.device)
-        nearest_locs_gpu = torch.from_numpy(nearest_locs_cpu.astype(np.float32)).to(operations.device)
-        pose_normals_gpu = torch.from_numpy(pose_normals_cpu.astype(np.float32)).to(operations.device)
+        search_locs_gpu = torch.from_numpy(search_locs_cpu.astype(np.float32)).to(operations.device).contiguous()
+        nearest_locs_gpu = torch.from_numpy(nearest_locs_cpu.astype(np.float32)).to(operations.device).contiguous()
+        pose_normals_gpu = torch.from_numpy(pose_normals_cpu.astype(np.float32)).to(operations.device).contiguous()
 
         custom_distances_gpu, gpu_time = operations.distance_calculation_gpu(
             search_locs_gpu, nearest_locs_gpu, pose_normals_gpu, curvature
@@ -1262,6 +1281,8 @@ def process_distance_calculation_all_approaches(unified_data: UnifiedStepData,
     # Verify results
     max_diff = 0
     max_batched_diff = 0
+    total_per_trace_passed = 0
+    total_stacked_passed = 0
     for i in range(len(all_distances_cpu)):
         cpu_result = all_distances_cpu[i]
         gpu_result = all_distances_gpu_per_trace[i].cpu().numpy()
@@ -1273,17 +1294,21 @@ def process_distance_calculation_all_approaches(unified_data: UnifiedStepData,
         gpu_batched_result_np = gpu_batched_result.cpu().numpy()
         batched_trace_diff = np.max(np.abs(cpu_result - gpu_batched_result_np))
         max_batched_diff = max(max_batched_diff, batched_trace_diff)
-
+        if max_diff < 1e-5:
+            total_per_trace_passed += 1
+        if max_batched_diff < 1e-5:
+            total_stacked_passed += 1
     unified_data.cpu_times["distance_calculation"] = total_cpu_time
     unified_data.gpu_per_trace_times["distance_calculation"] = total_gpu_per_trace_time
     unified_data.gpu_batched_times["distance_calculation"] = total_gpu_batched_time
 
+
     unified_data.verification_results["distance_calculation"] = {
-        "per_trace_max_diff": max_diff,
-        "batched_max_diff": max_batched_diff,
-        "per_trace_passed": max_diff < 1e-4,
-        "batched_passed": total_gpu_batched_time > 0,  # Pass if batched ran without error
-        "passed": max_diff < 1e-4 and total_gpu_batched_time > 0
+        "max_diff": max_diff,
+        "max_batched_diff": max_batched_diff,
+        "percent_per_trace_passed": 100 * total_per_trace_passed / len(all_distances_cpu),
+        "percent_stacked_passed": 100 * total_stacked_passed / len(all_distances_cpu),
+        "passed": max_diff < 1e-5
     }
 
     print(f"    CPU: {total_cpu_time * 1000:.3f}ms")
@@ -1331,10 +1356,10 @@ def process_pose_evidence_all_approaches(unified_data: UnifiedStepData,
         all_pose_evidence_cpu.append(pose_evidence_cpu)
 
         # GPU Per-Trace version
-        query_poses_gpu = torch.from_numpy(query_pose_vectors.astype(np.float32)).to(operations.device)
-        node_poses_gpu = torch.from_numpy(node_pose_vectors.astype(np.float32)).to(operations.device)
-        weights_gpu = torch.from_numpy(weights_cpu.astype(np.float32)).to(operations.device)
-        use_cd_gpu = torch.from_numpy(use_cd.astype(np.float32)).to(operations.device)
+        query_poses_gpu = torch.from_numpy(query_pose_vectors.astype(np.float32)).to(operations.device).contiguous()
+        node_poses_gpu = torch.from_numpy(node_pose_vectors.astype(np.float32)).to(operations.device).contiguous()
+        weights_gpu = torch.from_numpy(weights_cpu.astype(np.float32)).to(operations.device).contiguous()
+        use_cd_gpu = torch.from_numpy(use_cd.astype(np.float32)).to(operations.device).contiguous()
 
         pose_evidence_gpu, gpu_time = operations.pose_evidence_gpu(
             query_poses_gpu, node_poses_gpu, use_cd_gpu, weights_gpu
@@ -1364,6 +1389,8 @@ def process_pose_evidence_all_approaches(unified_data: UnifiedStepData,
     # Verify results
     max_diff = 0
     max_batched_diff = 0
+    total_per_trace_passed = 0
+    total_stacked_passed = 0
     for i in range(len(all_pose_evidence_cpu)):
         cpu_result = all_pose_evidence_cpu[i]
         gpu_result = all_pose_evidence_gpu_per_trace[i].cpu().numpy()
@@ -1381,13 +1408,20 @@ def process_pose_evidence_all_approaches(unified_data: UnifiedStepData,
                 gpu_batched_result_np = gpu_batched_result.cpu().numpy()
                 batched_trace_diff = np.max(np.abs(cpu_result - gpu_batched_result_np))
                 max_batched_diff = max(max_batched_diff, batched_trace_diff)
+        if max_diff < 1e-5:
+            total_per_trace_passed += 1
+        if max_batched_diff < 1e-5:
+            total_stacked_passed += 1
 
 
     unified_data.verification_results["pose_evidence"] = {
         "max_diff": max_diff,
         "max_batched_diff": max_batched_diff,
+        "percent_per_trace_passed": 100 * total_per_trace_passed / len(all_pose_evidence_cpu),
+        "percent_stacked_passed": 100 * total_stacked_passed / len(all_pose_evidence_cpu),
         "passed": max_diff < 1e-5
     }
+
 
     # Print timing comparison
     print(f"    CPU: {total_cpu_time * 1000:.3f}ms")
@@ -1402,9 +1436,9 @@ def process_pose_evidence_all_approaches(unified_data: UnifiedStepData,
     return True
 
 
-def process_final_aggregation_all_approaches(unified_data: UnifiedStepData,
+def process_radius_evidence_max_all_approaches(unified_data: UnifiedStepData,
                                            operations: MontyOperations) -> bool:
-    """Process final aggregation with CPU, GPU per-trace, and GPU batched approaches."""
+    """Process radius evidence max with CPU, GPU per-trace, and GPU batched approaches."""
     # CPU and GPU Per-Trace processing
     all_final_evidence_cpu = []
     all_final_evidence_gpu_per_trace = []
@@ -1417,13 +1451,13 @@ def process_final_aggregation_all_approaches(unified_data: UnifiedStepData,
         radius_evidence = trace_data["radius_evidence"]
 
         # CPU implementation
-        final_evidence_cpu, cpu_time = operations.final_aggregation_cpu(radius_evidence)
+        final_evidence_cpu, cpu_time = operations.radius_evidence_max_cpu(radius_evidence)
         total_cpu_time += cpu_time
         all_final_evidence_cpu.append(final_evidence_cpu)
 
         # GPU Per-Trace version
         radius_evidence_gpu = torch.from_numpy(radius_evidence.astype(np.float32)).to(operations.device)
-        final_evidence_gpu, gpu_time = operations.final_aggregation_gpu(radius_evidence_gpu)
+        final_evidence_gpu, gpu_time = operations.radius_evidence_max_gpu(radius_evidence_gpu)
         total_gpu_per_trace_time += gpu_time
         all_final_evidence_gpu_per_trace.append(final_evidence_gpu)
 
@@ -1434,23 +1468,25 @@ def process_final_aggregation_all_approaches(unified_data: UnifiedStepData,
     if unified_data.num_valid_traces > 0:
         try:
             # Use UnifiedStepData for batched processing
-            batched_final_evidence, total_gpu_batched_time = operations.final_aggregation_gpu_batched(unified_data)
+            batched_final_evidence, total_gpu_batched_time = operations.radius_evidence_max_gpu_batched(unified_data)
         except Exception as e:
             print(f"    Batched GPU failed: {e}")
             total_gpu_batched_time = 0
 
     if not all_final_evidence_cpu:
-        print("    No final aggregation data processed")
+        print("    No radius evidence max data processed")
         return False
 
     # Store results and timing
-    unified_data.cpu_times["final_aggregation"] = total_cpu_time
-    unified_data.gpu_per_trace_times["final_aggregation"] = total_gpu_per_trace_time
-    unified_data.gpu_batched_times["final_aggregation"] = total_gpu_batched_time
+    unified_data.cpu_times["radius_evidence_max"] = total_cpu_time
+    unified_data.gpu_per_trace_times["radius_evidence_max"] = total_gpu_per_trace_time
+    unified_data.gpu_batched_times["radius_evidence_max"] = total_gpu_batched_time
 
     # Verify results
     max_diff = 0
     max_batched_diff = 0
+    total_per_trace_passed = 0
+    total_stacked_passed = 0
     for i in range(len(all_final_evidence_cpu)):
         cpu_result = all_final_evidence_cpu[i]
         gpu_result = all_final_evidence_gpu_per_trace[i].cpu().numpy()
@@ -1467,13 +1503,17 @@ def process_final_aggregation_all_approaches(unified_data: UnifiedStepData,
                 batched_result = batched_final_evidence[offsets[i]:offsets[i+1]].cpu().numpy()
                 batched_trace_diff = np.max(np.abs(cpu_result - batched_result))
                 max_batched_diff = max(max_batched_diff, batched_trace_diff)
+        if max_diff < 1e-5:
+            total_per_trace_passed += 1
+        if max_batched_diff < 1e-5:
+            total_stacked_passed += 1
 
-    unified_data.verification_results["final_aggregation"] = {
-        "per_trace_max_diff": max_diff,
-        "batched_max_diff": max_batched_diff,
-        "per_trace_passed": max_diff < 1e-5,
-        "batched_passed": total_gpu_batched_time > 0,  # Pass if batched ran without error
-        "passed": max_diff < 1e-5 and total_gpu_batched_time > 0
+    unified_data.verification_results["radius_evidence_max"] = {
+        "max_diff": max_diff,
+        "max_batched_diff": max_batched_diff,
+        "percent_per_trace_passed": 100 * total_per_trace_passed / len(all_final_evidence_cpu),
+        "percent_stacked_passed": 100 * total_stacked_passed / len(all_final_evidence_cpu),
+        "passed": max_diff < 1e-5
     }
 
     print(f"    CPU: {total_cpu_time * 1000:.3f}ms")
@@ -1539,6 +1579,8 @@ def process_pose_transformation_all_approaches(unified_data: UnifiedStepData,
     # Verify results
     max_diff = 0
     max_batched_diff = 0
+    total_per_trace_passed = 0
+    total_stacked_passed = 0
     for i in range(len(all_transformed_cpu)):
         cpu_result = all_transformed_cpu[i]
         gpu_result = all_transformed_gpu_per_trace[i].cpu().numpy()
@@ -1551,11 +1593,16 @@ def process_pose_transformation_all_approaches(unified_data: UnifiedStepData,
         gpu_batched_result_np = gpu_batched_result.cpu().numpy()
         batched_trace_diff = np.max(np.abs(cpu_result - gpu_batched_result_np))
         max_batched_diff = max(max_batched_diff, batched_trace_diff)
-        # print(batched_trace_diff)
+        if max_diff < 1e-5:
+            total_per_trace_passed += 1
+        if max_batched_diff < 1e-5:
+            total_stacked_passed += 1
 
     unified_data.verification_results["pose_transformation"] = {
         "max_diff": max_diff,
         "max_batched_diff": max_batched_diff,
+        "percent_per_trace_passed": 100 * total_per_trace_passed / len(all_transformed_cpu),
+        "percent_stacked_passed": 100 * total_stacked_passed / len(all_transformed_cpu),
         "passed": max_diff < 1e-5
     }
 
@@ -1636,6 +1683,8 @@ def process_evidence_aggregation_all_approaches(unified_data: UnifiedStepData,
     # Verify results
     max_diff = 0
     max_batched_diff = 0
+    total_per_trace_passed = 0
+    total_stacked_passed = 0
     for i in range(len(all_aggregated_cpu)):
         cpu_result = all_aggregated_cpu[i]
         gpu_result = all_aggregated_gpu_per_trace[i].cpu().numpy()
@@ -1649,9 +1698,16 @@ def process_evidence_aggregation_all_approaches(unified_data: UnifiedStepData,
         gpu_batched_result_np = gpu_batched_result.cpu().numpy()
         batched_trace_diff = np.max(np.abs(cpu_result - gpu_batched_result_np))
         max_batched_diff = max(max_batched_diff, batched_trace_diff)
+        if max_diff < 1e-5:
+            total_per_trace_passed += 1
+        if max_batched_diff < 1e-5:
+            total_stacked_passed += 1
+
     unified_data.verification_results["evidence_aggregation"] = {
         "max_diff": max_diff,
         "max_batched_diff": max_batched_diff,
+        "percent_per_trace_passed": 100 * total_per_trace_passed / len(all_aggregated_cpu),
+        "percent_stacked_passed": 100 * total_stacked_passed / len(all_aggregated_cpu),
         "passed": max_diff < 1e-5
     }
 
@@ -1681,7 +1737,7 @@ def log_performance_to_csv(results: Dict[str, Any], experiment_name: str, csv_fi
         'experiment_name', 'step', 'function_name', 'num_traces', 'total_hypotheses',
         'cpu_time_ms', 'gpu_per_trace_time_ms', 'gpu_batched_time_ms',
         'per_trace_speedup', 'batched_speedup', 'batch_vs_pertrace_speedup',
-        'verification_passed', 'max_diff', 'max_batched_diff', 'timestamp'
+        'verification_percent_per_trace_passed', 'verification_percent_stacked_passed', 'max_diff', 'max_batched_diff', 'timestamp'
     ]
 
     # Check if CSV exists, create with headers if not
@@ -1716,7 +1772,8 @@ def log_performance_to_csv(results: Dict[str, Any], experiment_name: str, csv_fi
 
                 # Get verification results
                 verification = step_result['verification_results'].get(func_name, {})
-                verification_passed = verification.get('passed', False)
+                verification_percent_per_trace_passed = verification.get('percent_per_trace_passed', 0)
+                verification_percent_stacked_passed = verification.get('percent_stacked_passed', 0)
                 max_diff = verification.get('max_diff', verification.get('per_trace_max_diff', 0))
                 max_batched_diff = verification.get('max_batched_diff', 0)
 
@@ -1733,7 +1790,8 @@ def log_performance_to_csv(results: Dict[str, Any], experiment_name: str, csv_fi
                     'per_trace_speedup': f"{per_trace_speedup:.2f}",
                     'batched_speedup': f"{batched_speedup:.2f}",
                     'batch_vs_pertrace_speedup': f"{batch_vs_pertrace:.2f}",
-                    'verification_passed': verification_passed,
+                    'verification_percent_per_trace_passed': verification_percent_per_trace_passed,
+                    'verification_percent_stacked_passed': verification_percent_stacked_passed,
                     'max_diff': f"{max_diff:.2e}",
                     'max_batched_diff': f"{max_batched_diff:.2e}",
                     'timestamp': timestamp

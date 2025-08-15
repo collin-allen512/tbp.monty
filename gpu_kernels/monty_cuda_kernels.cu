@@ -493,7 +493,7 @@ torch::Tensor pose_evidence_cuda(
     return pose_evidence_result;
 }
 
-torch::Tensor final_aggregation(
+torch::Tensor radius_evidence_max(
     torch::Tensor evidence_matrix) {
     return std::get<0>(torch::max(evidence_matrix, /*dim=*/1));
 }
@@ -941,11 +941,11 @@ torch::Tensor pose_evidence_stacked_cpu(
     return pose_evidence_result;
 }
 
-torch::Tensor final_aggregation_stacked(
+torch::Tensor radius_evidence_max_stacked(
     torch::Tensor evidence_matrix) {  // (total_hyp, neighbors)
 
     // Simple wrapper - existing function should work with stacked data
-    return final_aggregation(evidence_matrix);
+    return radius_evidence_max(evidence_matrix);
 }
 
 // ============================================================================
@@ -967,8 +967,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           "Angle calculation");
     m.def("pose_evidence", &pose_evidence_cuda,
           "Pose evidence calculation");
-    m.def("final_aggregation", &final_aggregation,
-          "Final aggregation");
+    m.def("radius_evidence_max", &radius_evidence_max,
+          "Radius evidence max");
 
     // NOTE: Batch processing functions removed - not used by gpu_monty_poc_clean.py
 
@@ -989,6 +989,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           "Stacked pose evidence calculation");
     m.def("pose_evidence_stacked_cpu", &pose_evidence_stacked_cpu,
           "Stacked pose evidence calculation");
-    m.def("final_aggregation_stacked", &final_aggregation_stacked,
-          "Stacked final aggregation");
+    m.def("radius_evidence_max_stacked", &radius_evidence_max_stacked,
+          "Stacked radius evidence max");
 }
