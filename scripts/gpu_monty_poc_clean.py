@@ -900,12 +900,15 @@ class MontyOperations:
             return {"type": "cuda", "error": str(e)}
 
 def run_step_analysis(traces: List[Dict], operations: MontyOperations,
-                     target_function: Optional[str] = None) -> Dict[str, Any]:
+                     target_function: Optional[str] = None, group_by_lm: bool = False) -> Dict[str, Any]:
     """Run per-step analysis comparing CPU, GPU Per-Trace, and GPU Batched."""
     # Group traces by step for all hypotheses that can run in parallel
     traces_by_step = {}
     for trace in traces:
         step = trace.get("step", 0)
+        if group_by_lm:
+            lm_id = trace.get("lm_id")
+            step = f"{step}_{lm_id}"
         if step not in traces_by_step:
             traces_by_step[step] = []
         traces_by_step[step].append(trace)
@@ -1809,6 +1812,7 @@ def main():
                        help="Test specific function (default: test all)")
     parser.add_argument("--csv-file", default="gpu_performance_data.csv",
                        help="CSV file to log performance data (default: gpu_performance_data.csv)")
+    parser.add_argument("--per-lm", default=False)
 
     args = parser.parse_args()
 
