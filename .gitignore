@@ -138,3 +138,7 @@ Session.vim
 
 # rsync
 .rsyncignore.local
+
+# Collin Adds
+zdelete/
+data/
