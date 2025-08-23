@@ -162,9 +162,9 @@ class MontyGPUTester:
             import monty_cuda
             self.cuda_kernels = monty_cuda
             self.use_cuda_kernels = True
-            print("✓ Monty CUDA kernels loaded successfully")
+            print("Monty CUDA kernels loaded successfully")
         except ImportError as e:
-            print(f"⚠ Monty CUDA kernels not available: {e}")
+            print(f"Monty CUDA kernels not available: {e}")
             print("  Using PyTorch fallback")
 
     # ========================================================================
@@ -606,16 +606,16 @@ class MontyGPUTester:
             "success": max_diff < 1e-5,
         }
 
-    def test_final_aggregation(self, trace_data: Dict[str, Any]) -> Dict[str, Any]:
-        """Test final aggregation."""
+    def test_radius_evidence_max(self, trace_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Test radius evidence max."""
         if "evidence_intermediates" not in trace_data:
             return {"error": "No evidence intermediates found"}
 
         intermediates = trace_data["evidence_intermediates"]
-        if "final_aggregation" not in intermediates:
-            return {"error": "No final aggregation data found"}
+        if "radius_evidence_max" not in intermediates:
+            return {"error": "No radius evidence max data found"}
 
-        data = intermediates["final_aggregation"]
+        data = intermediates["radius_evidence_max"]
         inputs = data["inputs"]
         expected_outputs = data["outputs"]
 
@@ -627,7 +627,7 @@ class MontyGPUTester:
         start_time = time.perf_counter()
 
         if self.use_cuda_kernels:
-            result_gpu = self.cuda_kernels.final_aggregation(evidence_matrix_gpu)
+            result_gpu = self.cuda_kernels.radius_evidence_max(evidence_matrix_gpu)
         else:
             result_gpu = torch.max(evidence_matrix_gpu, dim=1).values
 
@@ -641,7 +641,7 @@ class MontyGPUTester:
         max_diff = np.max(np.abs(result_cpu - expected))
 
         return {
-            "function": "final_aggregation",
+            "function": "radius_evidence_max",
             "gpu_time": gpu_time,
             "cpu_time": data["timing"],
             "max_difference": max_diff,
@@ -753,9 +753,8 @@ class MontyGPUTester:
 
             # Print summary for this step
             print(f"  GPU compute time: {gpu_compute_time * 1000:.3f}ms (+ {gpu_data_prep_time * 1000:.3f}ms data prep)")
-            if cpu_baseline:
-                print(f"  CPU compute time: {cpu_time * 1000:.3f}ms")
-                print(f"  Speedup: {step_result['speedup']:.2f}x")
+            print(f"  CPU compute time: {cpu_time * 1000:.3f}ms")
+            print(f"  Speedup: {step_result['speedup']:.2f}x")
 
             # Print memory information
             if self.device.type == "cuda":
@@ -764,13 +763,6 @@ class MontyGPUTester:
                       f"Δ={memory_delta['allocated_delta_mb']:+.1f}MB")
                 if memory_delta['fragmentation_estimate'] > 10:
                     print(f"  ⚠️  High fragmentation: {memory_delta['fragmentation_estimate']:.1f}% (cached - allocated)")
-
-            # Early warning for performance degradation
-            if len(step_results) > 1:
-                current_time = gpu_compute_time * 1000
-                first_time = step_results[0]["gpu_compute_time"] * 1000
-                if current_time > first_time * 1.5:  # 50% slowdown
-                    print(f"  ⚠️  Performance degradation detected: {current_time:.1f}ms vs {first_time:.1f}ms baseline")
 
         # Calculate overall statistics
         avg_speedup = np.mean([r["speedup"] for r in step_results if r["speedup"] > 0])
@@ -829,7 +821,7 @@ class MontyGPUTester:
             "nearest_neighbor_search",
             "distance_calculation",
             "pose_evidence_matrix",
-            "final_aggregation"
+            "radius_evidence_max"
         ]
 
         return all(key in intermediates for key in required_keys)
@@ -863,9 +855,9 @@ class MontyGPUTester:
         evid_agg_result = self._test_stacked_evidence_aggregation(batch_state)
         results["evidence_aggregation"] = evid_agg_result
 
-        # 7. Final Aggregation
-        final_agg_result = self._test_stacked_final_aggregation(batch_state)
-        results["final_aggregation"] = final_agg_result
+        # 7. Radius evidence max
+        final_agg_result = self._test_stacked_radius_evidence_max(batch_state)
+        results["radius_evidence_max"] = final_agg_result
 
         return results
 
@@ -931,9 +923,9 @@ class MontyGPUTester:
             else:
                 # Fall back to final evidence from trace outputs if available
                 if ("evidence_intermediates" in trace and
-                    "final_aggregation" in trace["evidence_intermediates"] and
-                    "outputs" in trace["evidence_intermediates"]["final_aggregation"]):
-                    final_agg = trace["evidence_intermediates"]["final_aggregation"]["outputs"]
+                    "radius_evidence_max" in trace["evidence_intermediates"] and
+                    "outputs" in trace["evidence_intermediates"]["radius_evidence_max"]):
+                    final_agg = trace["evidence_intermediates"]["radius_evidence_max"]["outputs"]
                     cpu_final_evidence.append(final_agg["location_evidence"])
 
         if not cpu_final_evidence:
@@ -1121,14 +1113,14 @@ class MontyGPUTester:
         pose_evidence = self._calculate_pose_evidence_batched(pn_angles, cd1_angles, custom_distances, graph_data, batch_state)
         pipeline_outputs["pose_evidence"] = pose_evidence
 
-        # STEP 7: Final Aggregation - USE STACKED KERNEL
-        if not (self.use_cuda_kernels and hasattr(self.cuda_kernels, 'final_aggregation_stacked')):
+        # STEP 7: Radius evidence max - USE STACKED KERNEL
+        if not (self.use_cuda_kernels and hasattr(self.cuda_kernels, 'radius_evidence_max_stacked')):
             raise RuntimeError(
-                "GPU kernel chaining failed: CUDA final_aggregation_stacked kernel not available. "
+                "GPU kernel chaining failed: CUDA radius_evidence_max_stacked kernel not available. "
                 "Ensure use_cuda_kernels=True and stacked kernels are properly loaded."
             )
 
-        final_evidence = self.cuda_kernels.final_aggregation_stacked(pose_evidence)
+        final_evidence = self.cuda_kernels.radius_evidence_max_stacked(pose_evidence)
         pipeline_outputs["final_evidence"] = final_evidence
 
         # Single synchronization point for all GPU operations
@@ -1252,238 +1244,6 @@ class MontyGPUTester:
         }
 
 
-    def _get_nearest_node_locations_batched(self, graph_data, nearest_node_ids):
-        """Get nearest node locations using KNN results."""
-        return graph_data["stacked_graph_locs"][nearest_node_ids]
-
-    def _calculate_angles_from_knn_batched(self, graph_data, nearest_node_ids):
-        """Calculate angles using graph features from KNN."""
-        # Extract angle calculation data from traces - this data is already in the correct format
-        all_node_pose_vectors = []
-        all_query_pose_vectors = []
-
-        for trace in graph_data["traces"]:
-            if not ("evidence_intermediates" in trace and
-                    "pose_evidence_matrix" in trace["evidence_intermediates"]):
-                raise RuntimeError(
-                    "GPU kernel chaining failed: Missing pose_evidence_matrix in trace evidence_intermediates. "
-                    "Ensure computation traces capture pose evidence calculations."
-                )
-
-            pose_data = trace["evidence_intermediates"]["pose_evidence_matrix"]
-            if "angle_calculation_inputs" not in pose_data:
-                raise RuntimeError(
-                    "GPU kernel chaining failed: Missing angle_calculation_inputs in pose_evidence_matrix. "
-                    "Ensure computation traces capture angle calculation inputs."
-                )
-
-            angle_inputs = pose_data["angle_calculation_inputs"]
-            if "node_pose_vectors" not in angle_inputs or "query_pose_vectors" not in angle_inputs:
-                raise RuntimeError(
-                    "GPU kernel chaining failed: Missing pose vectors in angle_calculation_inputs. "
-                    "Check that pose vector data is properly saved during trace capture."
-                )
-
-            # The saved data is already per-hypothesis format: (num_hyp, num_neighbors, 3) and (num_hyp, 3)
-            all_node_pose_vectors.append(angle_inputs["node_pose_vectors"])
-            all_query_pose_vectors.append(angle_inputs["query_pose_vectors"])
-
-        if not all_node_pose_vectors:
-            raise RuntimeError(
-                "GPU kernel chaining failed: No pose vector data found in any trace. "
-                "Ensure profiling captures complete pose evidence calculations."
-            )
-
-        # Convert to tensors - concatenate along hypothesis dimension
-        # all_node_pose_vectors: list of (num_hyp_i, num_neighbors, 3) arrays
-        # all_query_pose_vectors: list of (num_hyp_i, 3) arrays
-        node_pose_vectors = torch.from_numpy(np.concatenate(all_node_pose_vectors, axis=0)).float().to(self.device)
-        query_pose_vectors = torch.from_numpy(np.concatenate(all_query_pose_vectors, axis=0)).float().to(self.device)
-
-        # The saved data already has the correct structure for angle calculation
-        # node_pose_vectors shape: (total_hypotheses, max_neighbors, 3)
-        # query_pose_vectors shape: (total_hypotheses, 3)
-
-        # Calculate dot products for angle computation
-        dot_products = torch.einsum("ijk,ik->ij", node_pose_vectors, query_pose_vectors)
-
-        # Calculate angles
-        pn_angles = torch.acos(torch.clamp(dot_products, -1.0, 1.0))
-
-        # For simplicity, use same angles for CD1 (in practice, would use different vectors)
-        cd1_angles = pn_angles.clone()
-
-        return pn_angles, cd1_angles
-
-    def _calculate_pose_evidence_batched(self, pn_angles, cd1_angles, custom_distances, graph_data, batch_state):
-        """Calculate pose evidence using angle and distance outputs with proper trace data extraction."""
-        # Extract the EXACT same parameters used in CPU computation for verification
-        all_pn_weights = []
-        all_cd1_weights = []
-        all_use_cd = []
-
-        for trace in graph_data["traces"]:
-            if not ("evidence_intermediates" in trace and
-                    "pose_evidence_matrix" in trace["evidence_intermediates"]):
-                raise RuntimeError(
-                    "GPU kernel chaining failed: Missing pose_evidence_matrix in trace evidence_intermediates."
-                )
-
-            pose_data = trace["evidence_intermediates"]["pose_evidence_matrix"]
-            if "intermediates" not in pose_data:
-                raise RuntimeError(
-                    "GPU kernel chaining failed: Missing intermediates in pose_evidence_matrix."
-                )
-
-            intermediates = pose_data["intermediates"]
-
-            # Extract the exact weights used in CPU computation
-            pn_weight = intermediates.get("pn_weight", 1.0)
-            cd1_weight = intermediates.get("cd1_weight", 0.0)
-
-            all_pn_weights.append(pn_weight)
-            all_cd1_weights.append(cd1_weight)
-
-            # Extract use_cd flag - this is critical for matching CPU behavior
-            if "use_cd" in intermediates and intermediates["use_cd"] is not None:
-                all_use_cd.append(intermediates["use_cd"])
-            else:
-                # Fallback: match CPU logic exactly
-                # When pose_fully_defined is False, cd1_weight = 0 and no use_cd is created
-                # When pose_fully_defined is True, cd1_weight > 0 and use_cd is extracted from node_features
-                hyp_count = len(trace["inputs"]["initial_hypotheses"]["evidence"])
-                max_neighbors = graph_data["max_neighbors"]
-
-                if cd1_weight == 0:
-                    # When cd1_weight = 0, use_cd effectively doesn't matter since cd1_evidence = 0
-                    # But the doubling logic still applies: pn_evidence[~use_cd] *= 2
-                    # So we need to set use_cd = False to enable doubling everywhere
-                    all_use_cd.append(np.full((hyp_count, max_neighbors), False, dtype=bool))
-                else:
-                    # This case should not happen if trace saving is working correctly
-                    # but as a fallback, assume use_cd = True when cd1_weight > 0
-                    all_use_cd.append(np.full((hyp_count, max_neighbors), True, dtype=bool))
-
-        # Prepare tensors for stacked kernel - matching the working test pattern
-        pn_weights_tensor = torch.tensor(all_pn_weights, dtype=torch.float32, device=self.device)
-        cd1_weights_tensor = torch.tensor(all_cd1_weights, dtype=torch.float32, device=self.device)
-
-        # Convert use_cd to int32 (kernel expects Int, not Bool)
-        # Handle variable neighbor counts by flattening
-        use_cd_flat = []
-        for use_cd in all_use_cd:
-            use_cd_flat.extend(use_cd.flatten())
-        use_cd_array = np.array(use_cd_flat, dtype=np.int32)
-        use_cd_tensor = torch.from_numpy(use_cd_array).to(self.device)
-
-        # Calculate proper trace offsets - based on actual hypothesis counts
-        trace_sizes = []
-        for i, trace in enumerate(batch_state.traces):
-            hyp_count = len(trace["inputs"]["initial_hypotheses"]["evidence"])
-            trace_sizes.append(hyp_count * graph_data["max_neighbors"])
-
-        trace_offsets = np.cumsum([0] + trace_sizes[:-1])
-        trace_offsets_tensor = torch.tensor(trace_offsets, dtype=torch.int32, device=self.device)
-
-        # USE STACKED POSE EVIDENCE KERNEL with proper trace data
-        if not (self.use_cuda_kernels and hasattr(self.cuda_kernels, 'pose_evidence_stacked')):
-            raise RuntimeError(
-                "GPU kernel chaining failed: CUDA pose_evidence_stacked kernel not available."
-            )
-
-        pose_evidence = self.cuda_kernels.pose_evidence_stacked(
-            pn_angles, cd1_angles, use_cd_tensor,
-            pn_weights_tensor, cd1_weights_tensor, trace_offsets_tensor
-        )
-
-        return pose_evidence
-
-    def _extract_simple_data_for_verification(self, batch_state: StackedBatchState) -> Dict[str, Any]:
-        """Extract simple data needed for result verification only."""
-        # Only extract what we need for verification - displacement results
-        all_search_locations = []
-        all_final_evidence = []
-
-        for trace in batch_state.traces:
-            # Get search locations from displacement
-            if "intermediates" in trace and "search_locations" in trace["intermediates"]:
-                all_search_locations.append(trace["intermediates"]["search_locations"])
-
-            # Get final evidence from outputs or final aggregation
-            if "outputs" in trace and "final_evidence" in trace["outputs"]:
-                all_final_evidence.append(trace["outputs"]["final_evidence"])
-            elif ("evidence_intermediates" in trace and
-                  "final_aggregation" in trace["evidence_intermediates"] and
-                  "outputs" in trace["evidence_intermediates"]["final_aggregation"]):
-                final_agg = trace["evidence_intermediates"]["final_aggregation"]["outputs"]
-                all_final_evidence.append(final_agg["location_evidence"])
-
-        return {
-            "search_locations": all_search_locations,
-            "final_evidence": all_final_evidence
-        }
-
-    def _run_cpu_baseline_from_traces(self, traces: list) -> Dict[str, Any]:
-        """Extract CPU kernel times for fair comparison with GPU compute time."""
-        # Extract individual CPU kernel times without control flow overhead
-        cpu_kernel_times = {
-            "displacement": [],
-            "knn_search": [],
-            "custom_distance": [],
-            "angle_calculation": [],
-            "pose_evidence": [],
-            "final_aggregation": []
-        }
-
-        cpu_data_prep_time = 0
-
-        for trace in traces:
-            # Data preparation overhead (similar to GPU data prep)
-            if "timing" in trace:
-                # These include data structure preparation overhead
-                cpu_data_prep_time += trace["timing"].get("pose_transformation", 0)
-                cpu_data_prep_time += trace["timing"].get("location_retrieval", 0)
-                cpu_data_prep_time += trace["timing"].get("feature_retrieval", 0)
-
-            # Core computation kernels (for fair comparison)
-            if "timing" in trace:
-                cpu_kernel_times["displacement"].append(trace["timing"].get("displacement", 0))
-
-            if "evidence_intermediates" in trace:
-                intermediates = trace["evidence_intermediates"]
-
-                # KNN search time
-                if "nearest_neighbor_search" in intermediates:
-                    knn_time = intermediates["nearest_neighbor_search"].get("timing", 0)
-                    cpu_kernel_times["knn_search"].append(knn_time)
-
-                # Distance calculation time
-                if "distance_calculation" in intermediates:
-                    dist_time = intermediates["distance_calculation"].get("timing", 0)
-                    cpu_kernel_times["custom_distance"].append(dist_time)
-
-                # Angle calculation and pose evidence from pose_evidence_matrix
-                if "pose_evidence_matrix" in intermediates:
-                    pose_data = intermediates["pose_evidence_matrix"]
-                    if "timing" in pose_data:
-                        timing = pose_data["timing"]
-                        cpu_kernel_times["angle_calculation"].append(timing.get("angle_calculation", 0))
-                        cpu_kernel_times["pose_evidence"].append(timing.get("evidence_computation", 0))
-
-                # Final aggregation
-                if "final_aggregation" in intermediates:
-                    final_time = intermediates["final_aggregation"].get("timing", 0)
-                    cpu_kernel_times["final_aggregation"].append(final_time)
-
-        # Sum up core computation times for fair comparison
-        cpu_compute_time = sum(sum(times) for times in cpu_kernel_times.values())
-
-        return {
-            "cpu_data_prep_time": cpu_data_prep_time,  # Exclude from comparison
-            "cpu_compute_time": cpu_compute_time,      # Fair comparison metric
-            "kernel_breakdown": {k: sum(v) for k, v in cpu_kernel_times.items()},
-            "comparison_note": "Use cpu_compute_time for fair comparison with GPU (excludes data prep overhead)"
-        }
 
     # ========================================================================
     # STACKED BATCH PROCESSING METHODS
@@ -1529,9 +1289,9 @@ class MontyGPUTester:
         results["evidence_aggregation"] = evid_agg_result
         total_time += evid_agg_result["time"]
 
-        # 7. Final Aggregation
-        final_result = self._test_stacked_final_aggregation(batch_state)
-        results["final_aggregation"] = final_result
+        # 7. Radius evidence max
+        final_result = self._test_stacked_radius_evidence_max(batch_state)
+        results["radius_evidence_max"] = final_result
         total_time += final_result["time"]
 
         return {
@@ -1741,25 +1501,6 @@ class MontyGPUTester:
             "max_difference": max_diff,
             "success": max_diff < 1e-5
         }
-
-    def _custom_distance_per_trace(self, all_node_locs, all_query_locs, all_pose_normals, all_max_curvatures):
-        """Process custom distance per-trace when max_curvatures differ."""
-        results = []
-
-        for i in range(len(all_node_locs)):
-            node_locs = torch.from_numpy(all_node_locs[i]).float().to(self.device)
-            query_locs = torch.from_numpy(all_query_locs[i]).float().to(self.device)
-            pose_normals = torch.from_numpy(all_pose_normals[i]).float().to(self.device)
-            max_curvature = all_max_curvatures[i] if i < len(all_max_curvatures) else 0.1
-
-            if self.use_cuda_kernels:
-                trace_result = self.cuda_kernels.custom_distance(node_locs, query_locs, pose_normals, max_curvature)
-            # else:
-            #     trace_result = self._custom_distance_pytorch(node_locs, query_locs, pose_normals, max_curvature)
-
-            results.append(trace_result)
-
-        return torch.cat(results, dim=0)
 
     def _test_stacked_angle_calculation(self, batch_state: StackedBatchState) -> Dict[str, Any]:
         """Test angle calculation with stacked data."""
@@ -2043,17 +1784,17 @@ class MontyGPUTester:
             "success": True
         }
 
-    def _test_stacked_final_aggregation(self, batch_state: StackedBatchState) -> Dict[str, Any]:
-        """Test final aggregation with stacked data."""
+    def _test_stacked_radius_evidence_max(self, batch_state: StackedBatchState) -> Dict[str, Any]:
+        """Test radius evidence max with stacked data."""
 
-        # Extract final aggregation data from traces
+        # Extract radius evidence max data from traces
         all_evidence_matrix = []
         all_expected_evidence = []
 
         for trace in batch_state.traces:
             if ("evidence_intermediates" in trace and
-                "final_aggregation" in trace["evidence_intermediates"]):
-                data = trace["evidence_intermediates"]["final_aggregation"]
+                "radius_evidence_max" in trace["evidence_intermediates"]):
+                data = trace["evidence_intermediates"]["radius_evidence_max"]
                 inputs = data["inputs"]
                 outputs = data["outputs"]
 
@@ -2065,7 +1806,7 @@ class MontyGPUTester:
                 "time": 0.0,
                 "max_difference": 0.0,
                 "success": True,
-                "note": "No final aggregation data found in traces"
+                "note": "No radius evidence max data found in traces"
             }
 
         # Stack data
@@ -2074,10 +1815,10 @@ class MontyGPUTester:
 
         start_time = time.perf_counter()
 
-        if self.use_cuda_kernels and hasattr(self.cuda_kernels, 'final_aggregation_stacked'):
-            result = self.cuda_kernels.final_aggregation_stacked(stacked_evidence_matrix)
+        if self.use_cuda_kernels and hasattr(self.cuda_kernels, 'radius_evidence_max_stacked'):
+            result = self.cuda_kernels.radius_evidence_max_stacked(stacked_evidence_matrix)
         # elif self.use_cuda_kernels:
-        #     result = self.cuda_kernels.final_aggregation(stacked_evidence_matrix)
+        #     result = self.cuda_kernels.radius_evidence_max(stacked_evidence_matrix)
         # else:
         #     # PyTorch fallback
         #     result = torch.max(stacked_evidence_matrix, dim=1).values
@@ -2116,330 +1857,6 @@ class MontyGPUTester:
 
         return max_diff
 
-    # ========================================================================
-    # ADAPTIVE BATCH PROCESSING METHODS (LEGACY)
-    # ========================================================================
-
-    def batch_traces_from_list(self, traces: list, max_padding_ratio: float = 2.0) -> Dict[str, Any]:
-        """Convert a list of traces into batched tensors with adaptive batching."""
-        if not traces:
-            return {"error": "No traces provided"}
-
-        # Separate traces that have the required data
-        displacement_traces = []
-        knn_traces = []
-
-        for trace in traces:
-            # Check for displacement data
-            if ("inputs" in trace and "intermediates" in trace and
-                "initial_hypotheses" in trace["inputs"] and
-                "channel_displacement" in trace["inputs"] and
-                "search_locations" in trace["intermediates"]):
-                displacement_traces.append(trace)
-
-            # Check for KNN data (assuming it's stored differently)
-            if ("inputs" in trace and "intermediates" in trace and
-                "initial_hypotheses" in trace["inputs"]):
-                knn_traces.append(trace)
-
-        batch_data = {}
-
-        # Process displacement traces with adaptive batching
-        if displacement_traces:
-            batch_data["displacement"] = self._prepare_displacement_adaptive_batch(
-                displacement_traces, max_padding_ratio
-            )
-
-        # Process KNN traces
-        if knn_traces:
-            batch_data["knn"] = self._prepare_knn_batch(knn_traces)
-
-        return batch_data
-
-    def _prepare_displacement_adaptive_batch(self, traces: list, max_padding_ratio: float = 2.0) -> Dict[str, Any]:
-        """Prepare batched displacement data with adaptive batching to minimize padding waste."""
-
-        # Get trace sizes and sort by hypothesis count
-        trace_info = []
-        for i, trace in enumerate(traces):
-            inputs = trace["inputs"]
-            n_hypotheses = inputs["initial_hypotheses"]["poses"].shape[0]
-            trace_info.append((i, n_hypotheses, trace))
-
-        # Sort by hypothesis count
-        trace_info.sort(key=lambda x: x[1])
-
-        # Group traces into batches with similar sizes
-        batches = []
-        current_batch = []
-
-        for trace_idx, n_hyp, trace in trace_info:
-            if not current_batch:
-                current_batch.append((trace_idx, n_hyp, trace))
-            else:
-                # Check if adding this trace would exceed padding ratio
-                current_max = max(item[1] for item in current_batch)
-                new_max = max(current_max, n_hyp)
-                current_min = min(item[1] for item in current_batch)
-                new_min = min(current_min, n_hyp)
-
-                padding_ratio = new_max / new_min if new_min > 0 else float('inf')
-
-                if padding_ratio <= max_padding_ratio:
-                    current_batch.append((trace_idx, n_hyp, trace))
-                else:
-                    # Start new batch
-                    batches.append(current_batch)
-                    current_batch = [(trace_idx, n_hyp, trace)]
-
-        # Add final batch
-        if current_batch:
-            batches.append(current_batch)
-
-        # Process each batch separately
-        batch_results = []
-        for batch in batches:
-            batch_traces = [item[2] for item in batch]
-            batch_result = self._prepare_displacement_batch(batch_traces)
-            batch_result["trace_indices"] = [item[0] for item in batch]
-            batch_result["hypothesis_counts"] = [item[1] for item in batch]
-            batch_results.append(batch_result)
-
-        return {
-            "batches": batch_results,
-            "num_batches": len(batch_results),
-            "total_traces": len(traces),
-            "adaptive": True
-        }
-
-    def _prepare_displacement_batch(self, traces: list) -> Dict[str, Any]:
-        """Prepare batched displacement data with padding for different shapes."""
-        poses_list = []
-        displacement_list = []
-        locations_list = []
-        expected_list = []
-        original_shapes = []
-
-        for trace in traces:
-            inputs = trace["inputs"]
-            intermediates = trace["intermediates"]
-
-            poses = inputs["initial_hypotheses"]["poses"]
-            locations = inputs["initial_hypotheses"]["locations"]
-            expected = intermediates["search_locations"]
-
-            poses_list.append(poses)
-            displacement_list.append(inputs["channel_displacement"])
-            locations_list.append(locations)
-            expected_list.append(expected)
-            original_shapes.append(poses.shape[0])  # Number of hypotheses
-
-        # Find maximum number of hypotheses for padding
-        max_hypotheses = max(original_shapes)
-
-        # Pad each tensor to max_hypotheses
-        poses_padded = []
-        locations_padded = []
-        expected_padded = []
-        masks = []
-
-        for i, (poses, locations, expected) in enumerate(zip(poses_list, locations_list, expected_list)):
-            n_hyp = poses.shape[0]
-
-            # Create mask for valid hypotheses
-            mask = np.zeros(max_hypotheses, dtype=bool)
-            mask[:n_hyp] = True
-            masks.append(mask)
-
-            # Pad poses (N, 3, 3) -> (max_hypotheses, 3, 3)
-            poses_pad = np.zeros((max_hypotheses, 3, 3), dtype=poses.dtype)
-            poses_pad[:n_hyp] = poses
-            poses_padded.append(poses_pad)
-
-            # Pad locations (N, 3) -> (max_hypotheses, 3)
-            locations_pad = np.zeros((max_hypotheses, 3), dtype=locations.dtype)
-            locations_pad[:n_hyp] = locations
-            locations_padded.append(locations_pad)
-
-            # Pad expected (N, 3) -> (max_hypotheses, 3)
-            expected_pad = np.zeros((max_hypotheses, 3), dtype=expected.dtype)
-            expected_pad[:n_hyp] = expected
-            expected_padded.append(expected_pad)
-
-        # Stack into batch tensors
-        poses_batch = torch.from_numpy(np.stack(poses_padded)).float().to(self.device)
-        displacement_batch = torch.from_numpy(np.stack(displacement_list)).float().to(self.device)
-        locations_batch = torch.from_numpy(np.stack(locations_padded)).float().to(self.device)
-        expected_batch = torch.from_numpy(np.stack(expected_padded)).float().to(self.device)
-        masks_batch = torch.from_numpy(np.stack(masks)).bool().to(self.device)
-
-        return {
-            "poses": poses_batch,
-            "displacement": displacement_batch,
-            "locations": locations_batch,
-            "expected": expected_batch,
-            "masks": masks_batch,
-            "original_shapes": original_shapes,
-            "max_hypotheses": max_hypotheses,
-            "batch_size": len(traces)
-        }
-
-    def _prepare_knn_batch(self, traces: list) -> Dict[str, Any]:
-        """Prepare batched KNN data."""
-        # For now, return a placeholder since KNN batch processing
-        # requires more complex data structure handling
-        return {"placeholder": True, "batch_size": len(traces)}
-
-    def test_displacement_batch(self, traces: list) -> Dict[str, Any]:
-        """Test displacement calculation in batch mode with adaptive batching."""
-        batch_data = self.batch_traces_from_list(traces)
-
-        if "displacement" not in batch_data:
-            return {"error": "No displacement data found in traces"}
-
-        disp_data = batch_data["displacement"]
-
-        # Handle adaptive batching
-        if disp_data.get("adaptive", False):
-            return self._test_adaptive_displacement_batch(disp_data)
-        else:
-            return self._test_single_displacement_batch(disp_data)
-
-    def _test_adaptive_displacement_batch(self, disp_data: Dict[str, Any]) -> Dict[str, Any]:
-        """Test adaptive displacement batching across multiple batches."""
-        total_time = 0
-        max_diff = 0.0
-        total_efficiency = 0.0
-        batch_results = []
-
-        for batch_info in disp_data["batches"]:
-            batch_result = self._test_single_displacement_batch(batch_info)
-            batch_results.append(batch_result)
-
-            total_time += batch_result["batch_time"]
-            max_diff = max(max_diff, batch_result["max_difference"])
-            total_efficiency += batch_result["efficiency"] * batch_info["batch_size"]
-
-        # Calculate overall efficiency
-        overall_efficiency = total_efficiency / disp_data["total_traces"]
-
-        return {
-            "function": "displacement_batch_adaptive",
-            "total_traces": disp_data["total_traces"],
-            "num_batches": disp_data["num_batches"],
-            "total_time": total_time,
-            "per_trace_time": total_time / disp_data["total_traces"],
-            "max_difference": max_diff,
-            "overall_efficiency": overall_efficiency,
-            "batch_results": batch_results,
-            "success": max_diff < 1e-5,
-        }
-
-    def _test_single_displacement_batch(self, disp_data: Dict[str, Any]) -> Dict[str, Any]:
-        """Test single displacement batch."""
-        start_time = time.perf_counter()
-
-        if self.use_cuda_kernels and hasattr(self.cuda_kernels, 'displacement_batch'):
-            # Use batch kernel if available
-            result_gpu = self.cuda_kernels.displacement_batch(
-                disp_data["poses"],
-                disp_data["displacement"],
-                disp_data["locations"]
-            )
-        # else:
-        #     # Fall back to sequential processing
-        #     batch_size = disp_data["batch_size"]
-        #     results = []
-
-        #     for i in range(batch_size):
-        #         if self.use_cuda_kernels:
-        #             result = self.cuda_kernels.displacement(
-        #                 disp_data["poses"][i],
-        #                 disp_data["displacement"][i],
-        #                 disp_data["locations"][i]
-        #             )
-        #         else:
-        #             # PyTorch fallback
-        #             rotated_disp = torch.matmul(disp_data["poses"][i], disp_data["displacement"][i])
-        #             result = disp_data["locations"][i] + rotated_disp
-        #         results.append(result)
-
-        #     result_gpu = torch.stack(results)
-
-        if self.device.type == 'cuda':
-            torch.cuda.synchronize()
-        batch_time = time.perf_counter() - start_time
-
-        # Compare with expected results, but only for valid hypotheses
-        expected = disp_data["expected"]
-        masks = disp_data["masks"]
-
-        # Apply masks and calculate difference only for valid hypotheses
-        valid_results = result_gpu[masks]
-        valid_expected = expected[masks]
-
-        if len(valid_results) > 0:
-            max_diff = torch.max(torch.abs(valid_results - valid_expected)).item()
-        else:
-            max_diff = 0.0
-
-        # Calculate efficiency (how much padding was used)
-        total_elements = result_gpu.numel()
-        valid_elements = masks.sum().item()
-        efficiency = valid_elements / total_elements if total_elements > 0 else 0.0
-
-        return {
-            "function": "displacement_batch",
-            "batch_size": disp_data["batch_size"],
-            "batch_time": batch_time,
-            "per_trace_time": batch_time / disp_data["batch_size"],
-            "max_difference": max_diff,
-            "input_shape": disp_data["poses"].shape,
-            "output_shape": result_gpu.shape,
-            "original_shapes": disp_data["original_shapes"],
-            "efficiency": efficiency,
-            "success": max_diff < 1e-5,
-        }
-
-    def test_knn_batch(self, traces: list) -> Dict[str, Any]:
-        """Test KNN search in batch mode."""
-        # For now, return a placeholder since full KNN batch processing
-        # requires more complex implementation
-        return {
-            "function": "knn_batch",
-            "batch_size": len(traces),
-            "error": "KNN batch processing not fully implemented yet"
-        }
-
-    def compare_batch_vs_sequential(self, traces: list) -> Dict[str, Any]:
-        """Compare batch vs sequential performance."""
-        if len(traces) < 2:
-            return {"error": "Need at least 2 traces for comparison"}
-
-        # Test batch processing
-        batch_result = self.test_displacement_batch(traces)
-
-        # Test sequential processing
-        sequential_times = []
-        for trace in traces:
-            result = self.test_displacement(trace)
-            if "error" not in result:
-                sequential_times.append(result["gpu_time"])
-
-        total_sequential_time = sum(sequential_times)
-
-        if "batch_time" in batch_result:
-            speedup = total_sequential_time / batch_result["batch_time"]
-
-            return {
-                "batch_time": batch_result["batch_time"],
-                "sequential_time": total_sequential_time,
-                "speedup": speedup,
-                "batch_success": batch_result["success"],
-                "traces_tested": len(traces)
-            }
-        else:
-            return {"error": "Batch processing failed"}
 
     def _run_cpu_baseline(self, traces: list) -> Dict[str, Any]:
         """Run CPU implementations of kernels for fair comparison."""
@@ -2449,7 +1866,7 @@ class MontyGPUTester:
             "custom_distance": 0,
             "angle_calculation": 0,
             "pose_evidence": 0,
-            "final_aggregation": 0,
+            "radius_evidence_max": 0,
             "total": 0
         }
 
@@ -2566,9 +1983,9 @@ class MontyGPUTester:
                 expected_evidence = pose_data["outputs"]["pose_evidence_weighted"]
                 # assert np.allclose(pose_evidence_cpu, expected_evidence, atol=1e-4), "CPU pose evidence mismatch"
 
-            # 6. Final Aggregation
-            if "final_aggregation" in trace["evidence_intermediates"]:
-                final_data = trace["evidence_intermediates"]["final_aggregation"]
+            # 6. Radius evidence max
+            if "radius_evidence_max" in trace["evidence_intermediates"]:
+                final_data = trace["evidence_intermediates"]["radius_evidence_max"]
 
                 radius_evidence = final_data["inputs"]["radius_evidence"]
 
@@ -2576,11 +1993,11 @@ class MontyGPUTester:
                 # CPU implementation: simple max
                 location_evidence_cpu = np.max(radius_evidence, axis=1)
 
-                cpu_times["final_aggregation"] += time.perf_counter() - start
+                cpu_times["radius_evidence_max"] += time.perf_counter() - start
 
                 # Verify
                 expected_final = final_data["outputs"]["location_evidence"]
-                assert np.allclose(location_evidence_cpu, expected_final, atol=1e-5), "CPU final aggregation mismatch"
+                assert np.allclose(location_evidence_cpu, expected_final, atol=1e-5), "CPU radius evidence max mismatch"
 
         cpu_times["total"] = sum(v for k, v in cpu_times.items() if k != "total")
 
@@ -2590,9 +2007,49 @@ class MontyGPUTester:
             "num_traces_processed": len([t for t in traces if "evidence_intermediates" in t])
         }
 
-    # ========================================================================
-    # HELPER METHODS
-    # ========================================================================
+
+    def test_single_function(self, function_name: str, traces: list) -> None:
+        """Test a single function across traces."""
+        print(f"\n--- Testing {function_name} ---")
+
+        total_gpu_time = 0
+        total_cpu_time = 0
+        success_count = 0
+        max_diff = 0
+
+        for i, trace in enumerate(traces[:3]):  # Test first 3 traces
+            result = # TODO test single function
+
+            if "error" in result:
+                print(f"Trace {i+1}: {result['error']}")
+                continue
+
+            print(f"Trace {i+1}:")
+            print(f"  GPU time: {result['gpu_time']*1000:.3f}ms")
+            if 'cpu_time' in result:
+                print(f"  CPU time: {result['cpu_time']*1000:.3f}ms")
+                total_cpu_time += result['cpu_time']
+            if 'max_difference' in result:
+                print(f"  Max difference: {result['max_difference']:.8f}")
+                max_diff = max(max_diff, result['max_difference'])
+            if 'match_ratio' in result:
+                print(f"  Match ratio: {result['match_ratio']:.3f}")
+            print(f"  Success: {'✓' if result['success'] else '✗'}")
+
+            total_gpu_time += result['gpu_time']
+            if result['success']:
+                success_count += 1
+
+        print(f"\nSummary for {function_name}:")
+        print(f"  Success rate: {success_count}/{len(traces[:3])}")
+        print(f"  Total GPU time: {total_gpu_time*1000:.3f}ms")
+        if total_cpu_time > 0:
+            print(f"  Total CPU time: {total_cpu_time*1000:.3f}ms")
+            print(f"  Speedup: {total_cpu_time/total_gpu_time:.1f}x")
+        if max_diff > 0:
+            print(f"  Max difference: {max_diff:.8f}")
+
+
 
     # ========================================================================
     # GPU MEMORY MONITORING METHODS
@@ -2731,48 +2188,6 @@ class MontyGPUTester:
               f"{before_cached:.1f}→{after_cached:.1f}MB cached")
 
 
-def test_single_function(tester: MontyGPUTester, function_name: str, test_func, traces: list) -> None:
-    """Test a single function across traces."""
-    print(f"\n--- Testing {function_name} ---")
-
-    total_gpu_time = 0
-    total_cpu_time = 0
-    success_count = 0
-    max_diff = 0
-
-    for i, trace in enumerate(traces[:3]):  # Test first 3 traces
-        result = test_func(trace)
-
-        if "error" in result:
-            print(f"Trace {i+1}: {result['error']}")
-            continue
-
-        print(f"Trace {i+1}:")
-        print(f"  GPU time: {result['gpu_time']*1000:.3f}ms")
-        if 'cpu_time' in result:
-            print(f"  CPU time: {result['cpu_time']*1000:.3f}ms")
-            total_cpu_time += result['cpu_time']
-        if 'max_difference' in result:
-            print(f"  Max difference: {result['max_difference']:.8f}")
-            max_diff = max(max_diff, result['max_difference'])
-        if 'match_ratio' in result:
-            print(f"  Match ratio: {result['match_ratio']:.3f}")
-        print(f"  Success: {'✓' if result['success'] else '✗'}")
-
-        total_gpu_time += result['gpu_time']
-        if result['success']:
-            success_count += 1
-
-    print(f"\nSummary for {function_name}:")
-    print(f"  Success rate: {success_count}/{len(traces[:3])}")
-    print(f"  Total GPU time: {total_gpu_time*1000:.3f}ms")
-    if total_cpu_time > 0:
-        print(f"  Total CPU time: {total_cpu_time*1000:.3f}ms")
-        print(f"  Speedup: {total_cpu_time/total_gpu_time:.1f}x")
-    if max_diff > 0:
-        print(f"  Max difference: {max_diff:.8f}")
-
-
 def main():
     """Main testing function."""
     parser = argparse.ArgumentParser(description="Unified Monty GPU PoC")
@@ -2781,17 +2196,8 @@ def main():
     parser.add_argument("--function", choices=[
         "displacement", "evidence_aggregation", "pose_transformation",
         "knn_search", "custom_distance", "angle_calculation", "pose_evidence",
-        "final_aggregation", "batch", "stacked", "per_step", "verified_pipeline"
+        "radius_evidence_max", "batch", "all"
     ], help="Test specific function")
-    parser.add_argument("--batch", action="store_true",
-                       help="Test batch processing performance")
-    parser.add_argument("--stacked", action="store_true",
-                       help="Test stacked batch processing performance")
-    parser.add_argument("--cpu-baseline", action="store_true",
-                       help="Run CPU baseline comparison for per-step analysis")
-    parser.add_argument("--verify-results", action="store_true",
-                       help="Verify GPU results against CPU outputs from traces")
-
     args = parser.parse_args()
 
     print("Monty GPU Proof of Concept")
@@ -2814,161 +2220,32 @@ def main():
         "custom_distance": tester.test_custom_distance,
         "angle_calculation": tester.test_angle_calculation,
         "pose_evidence": tester.test_pose_evidence,
-        "final_aggregation": tester.test_final_aggregation,
+        "radius_evidence_max": tester.test_radius_evidence_max,
     }
+    # Run per-step analysis
+    print("\nPer-Step Performance Analysis")
+    print("=" * 40)
 
-    if args.function == "stacked" or args.stacked:
-        # Test stacked batch processing
-        print("\n--- Testing Stacked Batch Processing ---")
-
-        stacked_result = tester.test_stacked_batch_pipeline(traces)
-        if "error" in stacked_result:
-            print(f"Stacked batch test failed: {stacked_result['error']}")
-        else:
-            print(f"Stacked Batch Results:")
-            print(f"  Total traces: {stacked_result['num_traces']}")
-            print(f"  Total hypotheses: {stacked_result['total_hypotheses']}")
-            print(f"  Total time: {stacked_result['total_time']*1000:.3f}ms")
-            print(f"  Per trace time: {stacked_result['per_trace_time']*1000:.3f}ms")
-            print(f"  Efficiency: {stacked_result['efficiency']:.2f}")
-            print(f"  Success: {'✓' if stacked_result['success'] else '✗'}")
-
-            # Show individual operation timings
-            print(f"\n  Operation Breakdown:")
-            for op_name, op_result in stacked_result['results'].items():
-                print(f"    {op_name}: {op_result['time']*1000:.3f}ms, "
-                      f"diff: {op_result['max_difference']:.8f}")
-
-    elif args.function == "batch" or args.batch:
-        # Test adaptive batch processing
-        print("\n--- Testing Adaptive Batch Processing ---")
-
-        # Test displacement batch
-        batch_result = tester.test_displacement_batch(traces)
-        if "error" in batch_result:
-            print(f"Batch test failed: {batch_result['error']}")
-        else:
-            if batch_result.get("function") == "displacement_batch_adaptive":
-                print(f"Adaptive Batch Results:")
-                print(f"  Total traces: {batch_result['total_traces']}")
-                print(f"  Number of batches: {batch_result['num_batches']}")
-                print(f"  Total time: {batch_result['total_time']*1000:.3f}ms")
-                print(f"  Per trace time: {batch_result['per_trace_time']*1000:.3f}ms")
-                print(f"  Max difference: {batch_result['max_difference']:.8f}")
-                print(f"  Overall efficiency: {batch_result['overall_efficiency']:.2f}")
-                print(f"  Success: {'✓' if batch_result['success'] else '✗'}")
-
-                # Show individual batch details
-                for i, batch_info in enumerate(batch_result['batch_results']):
-                    shapes = batch_info['original_shapes']
-                    min_shape, max_shape = min(shapes), max(shapes)
-                    efficiency = batch_info['efficiency']
-                    print(f"    Batch {i+1}: {len(shapes)} traces, "
-                          f"shapes {min_shape}-{max_shape}, eff {efficiency:.2f}")
-            else:
-                print(f"Single Batch Results:")
-                print(f"  Batch size: {batch_result['batch_size']}")
-                print(f"  Batch time: {batch_result['batch_time']*1000:.3f}ms")
-                print(f"  Per trace time: {batch_result['per_trace_time']*1000:.3f}ms")
-                print(f"  Max difference: {batch_result['max_difference']:.8f}")
-                print(f"  Efficiency: {batch_result['efficiency']:.2f}")
-                print(f"  Original shapes: {batch_result['original_shapes']}")
-                print(f"  Success: {'✓' if batch_result['success'] else '✗'}")
-
-        # Test performance comparison
-        comparison = tester.compare_batch_vs_sequential(traces)
-        if "speedup" in comparison:
-            print(f"\nPerformance Comparison:")
-            print(f"  Batch time: {comparison['batch_time']*1000:.3f}ms")
-            print(f"  Sequential time: {comparison['sequential_time']*1000:.3f}ms")
-            print(f"  Speedup: {comparison['speedup']:.2f}x")
-        else:
-            print(f"Comparison failed: {comparison}")
-
-    elif args.function == "per_step":
-        # Run per-step analysis
-        print("\nPer-Step Performance Analysis")
-        print("=" * 40)
-
-        step_results = tester.test_per_step_analysis(traces, cpu_baseline=args.cpu_baseline)
-
-        print(f"\nOverall Results:")
-        print(f"  Number of steps: {step_results['num_steps']}")
-        print(f"  Total traces: {step_results['total_traces']}")
-        print(f"  Total GPU time: {step_results['total_gpu_time']*1000:.3f}ms")
-
-        if args.cpu_baseline:
-            print(f"  Total CPU time: {step_results['total_cpu_time']*1000:.3f}ms")
-            print(f"  Overall speedup: {step_results['overall_speedup']:.2f}x")
-            print(f"  Average speedup per step: {step_results['avg_speedup_per_step']:.2f}x")
-        # for function in function_map.keys():
-        print(f"   GPU time: {step_results['total_gpu_time']*1000:.3f}ms")
-
-        # Save results to JSON for further analysis
-        import json
-        output_file = os.path.join(args.output_dir, "per_step_gpu_results.json")
-        with open(output_file, "w") as f:
-            json.dump(step_results, f, indent=2, default=str)
-        print(f"\nResults saved to: {output_file}")
-
-    elif args.function == "verified_pipeline":
-        # Run verified pipeline test
-        print("\n--- Testing Verified GPU Pipeline ---")
-
-        # Group traces by step for verification testing
-        traces_by_step = {}
-        for trace in traces:
-            step = trace.get("step", 0)
-            if step not in traces_by_step:
-                traces_by_step[step] = []
-            traces_by_step[step].append(trace)
-
-        # Test first few steps
-        total_verified = 0
-        total_successful = 0
-
-        for step, step_traces in sorted(list(traces_by_step.items())[:3]):
-            print(f"\nVerifying step {step} with {len(step_traces)} traces...")
-
-            gpu_state = StackedBatchState(step_traces, tester.device)
-            verified_results = tester._run_step_pipeline_with_verification(gpu_state)
-
-            if "error" in verified_results:
-                print(f"  Error: {verified_results['error']}")
-                continue
-
-            verification = verified_results.get("verification", {})
-            pipeline_time = verified_results.get("total_pipeline_time", 0)
-
-            print(f"  Pipeline time: {pipeline_time*1000:.3f}ms")
-            print(f"  Overall verification: {'✓' if verification.get('overall_success') else '✗'}")
-
-            # Show individual verification results
-            for test_name, test_result in verification.items():
-                if isinstance(test_result, dict) and "success" in test_result:
-                    success_icon = "✓" if test_result["success"] else "✗"
-                    max_diff = test_result.get("max_difference", 0)
-                    print(f"    {test_name}: {success_icon} (max_diff: {max_diff:.2e})")
-
-            total_verified += 1
-            if verification.get("overall_success"):
-                total_successful += 1
-
-        print(f"\nVerification Summary:")
-        print(f"  Steps verified: {total_verified}")
-        print(f"  Successful verifications: {total_successful}/{total_verified}")
-        print(f"  Success rate: {total_successful/total_verified*100:.1f}%" if total_verified > 0 else "  No steps verified")
-
-    elif args.function == "pose_evidence_test":
-        # Run simple pose evidence test
-        tester.test_pose_evidence_simple()
+    if args.function == "all":
+        step_results = tester.test_all_functions(traces)
     elif args.function:
-        # Test specific function
-        test_single_function(tester, args.function, function_map[args.function], traces)
-    else:
-        # Test all categories
-        for func_name, test_func in function_map.items():
-            test_single_function(tester, func_name, test_func, traces)
+        tester.test_single_function(args.function, traces)
+
+    print(f"\nOverall Results:")
+    print(f"  Number of steps: {step_results['num_steps']}")
+    print(f"  Total traces: {step_results['total_traces']}")
+    print(f"  Total GPU time: {step_results['total_gpu_time']*1000:.3f}ms")
+
+    print(f"  Total CPU time: {step_results['total_cpu_time']*1000:.3f}ms")
+    print(f"  Overall speedup: {step_results['overall_speedup']:.2f}x")
+    print(f"  Average speedup per step: {step_results['avg_speedup_per_step']:.2f}x")
+
+    # Save results to JSON for further analysis
+    import json
+    output_file = os.path.join(args.output_dir, "per_step_gpu_results.json")
+    with open(output_file, "w") as f:
+        json.dump(step_results, f, indent=2, default=str)
+    print(f"\nResults saved to: {output_file}")
 
 
 if __name__ == "__main__":

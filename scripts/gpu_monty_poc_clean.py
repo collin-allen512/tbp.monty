@@ -1,23 +1,12 @@
-#!/usr/bin/env python3
-"""GPU Proof of Concept for Monty - Clean Implementation
+# Copyright 2025 Thousand Brains Project
+#
+# Copyright may exist in Contributors' modifications
+# and/or contributions to the work.
+#
+# Use of this source code is governed by the MIT
+# license that can be found in the LICENSE file or at
+# https://opensource.org/licenses/MIT.
 
-Clean implementation that tests GPU kernels against CPU implementations.
-Each Monty operation has exactly one GPU and one CPU implementation.
-
-Features:
-- Always runs per-step analysis
-- Always benchmarks GPU vs CPU performance
-- Always verifies GPU outputs against CPU outputs
-- Chains operations when possible, falls back to trace data when needed
-- Clear separation between GPU and CPU implementations
-
-Usage:
-    # Test all functions (default)
-    python gpu_monty_poc_clean.py --output-dir /path/to/experiment
-
-    # Test specific function
-    python gpu_monty_poc_clean.py --output-dir /path/to/experiment --function displacement
-"""
 
 import argparse
 import csv
@@ -45,7 +34,15 @@ except ImportError:
 
 
 def load_profiling_data(output_dir: str) -> List[Dict]:
-    """Load saved profiling traces from experiment output."""
+    """Load saved profiling traces from experiment output.
+
+    Args:
+        output_dir: Path to the directory containing profiling trace files.
+
+    Returns:
+        List of dictionaries containing complete computation traces with evidence data.
+        Returns empty list if no profiling data is found.
+    """
     output_path = Path(output_dir)
     total_traces = []
     # Hard coded to 5 LM max for now TODO handle arbitrary LM count max
@@ -69,7 +66,25 @@ def load_profiling_data(output_dir: str) -> List[Dict]:
 
 
 class UnifiedStepData:
-    """Unified data structure for processing a step with both per-trace and batched approaches."""
+    """Unified data structure for processing step trace data into format for profiling.
+
+    This class organizes computation traces for efficient processing using both
+    per-trace and batched GPU approaches. It prepares and manages data structures needed
+    for comparing CPU, GPU per-trace, and GPU batched implementations.
+
+    Attributes:
+        device: PyTorch device (CPU or CUDA) for tensor operations.
+        step_traces: List of trace dictionaries for the current step.
+        num_traces: Total number of traces in the step.
+        valid_traces: List of traces with all required data.
+        num_valid_traces: Number of valid traces.
+        per_trace_data: List of dictionaries containing per-trace computation data.
+        stacked_data: Dictionary of stacked tensors for batched GPU processing.
+        cpu_times: Dictionary mapping function names to CPU execution times.
+        gpu_per_trace_times: Dict mapping function names to GPU per-trace execution times.
+        gpu_batched_times: Dict mapping function names to GPU batched execution times.
+        verification_results: Dict of verification results for each function.
+    """
 
     def __init__(self, step_traces: List[Dict], device: torch.device):
         self.device = device
@@ -95,129 +110,191 @@ class UnifiedStepData:
         self._prepare_data()
 
     def _is_valid_trace(self, trace: Dict) -> bool:
-        """Check if trace has all required data."""
+        """Check if trace has all required data.
+
+        Args:
+            trace: Dictionary containing trace data.
+
+        Returns:
+            True if trace contains all required fields (inputs, initial_hypotheses,
+            channel_displacement), False otherwise.
+        """
         return ("inputs" in trace and
                 "initial_hypotheses" in trace["inputs"] and
                 "channel_displacement" in trace["inputs"])
 
     def _prepare_data(self):
-        """Prepare both per-trace and stacked data structures."""
-        # Prepare per-trace data
+        """Prepare both per-trace and stacked data structures.
+
+        Extracts relevant data from traces and organizes it into two formats:
+        1. Per-trace data: Individual dictionaries for each trace.
+        2. Stacked data: Concatenated tensors for batched GPU processing.
+
+        This method populates self.per_trace_data and self.stacked_data.
+        """
         for trace in self.valid_traces:
-            inputs = trace["inputs"]
-            per_trace_item = {
-                "poses": inputs["initial_hypotheses"]["poses"],
-                "locations": inputs["initial_hypotheses"]["locations"],
-                "evidence": inputs["initial_hypotheses"]["evidence"],
-                "displacement": inputs["channel_displacement"],
-                "trace": trace  # Keep reference to full trace
-            }
+            per_trace_item = self._extract_base_trace_data(trace)
 
-            if ("evidence_intermediates" in trace):
-
-                # Add pose transformation data
-                if ("pose_transformation" in trace["evidence_intermediates"]):
-                    pose_data = trace["evidence_intermediates"]["pose_transformation"]
-                    per_trace_item["channel_possible_poses"] = pose_data["inputs"]["channel_possible_poses"]
-                    per_trace_item["channel_features"] = pose_data["inputs"]["channel_features"]
-                    per_trace_item["pose_vectors"] = pose_data["inputs"]["channel_features"]["pose_vectors"]
-
-                # Add KNN search data
-                if ("nearest_neighbor_search" in trace["evidence_intermediates"]):
-                    nn_data = trace["evidence_intermediates"]["nearest_neighbor_search"]
-                    per_trace_item["graph_locations"] = nn_data["inputs"]["graph_locations"]
-                    per_trace_item["search_locations"] = nn_data["inputs"]["search_locations"]
-                    per_trace_item["nearest_node_ids"] = nn_data["outputs"]["nearest_node_ids"]
-
-                # Add distance calculation data
-                if ("distance_calculation" in trace["evidence_intermediates"]):
-                    dist_data = trace["evidence_intermediates"]["distance_calculation"]
-                    per_trace_item["search_locations"] = dist_data["inputs"]["search_locations"]
-                    per_trace_item["nearest_node_locs"] = dist_data["inputs"]["nearest_node_locs"]
-                    per_trace_item["pose_normals"] = dist_data["inputs"]["pose_normals"]
-                    per_trace_item["max_abs_curvature"] = dist_data["inputs"]["max_abs_curvature"]
-                    per_trace_item["custom_distances"] = dist_data["outputs"]["custom_nearest_node_dists"]
-
-                # Add pose evidence data
-                if ("pose_evidence_matrix" in trace["evidence_intermediates"]):
-                    pe_data = trace["evidence_intermediates"]["pose_evidence_matrix"]
-                    per_trace_item["query_pose_vectors"] = pe_data["inputs"]["query_features"]["pose_vectors"]
-                    per_trace_item["node_pose_vectors"] = pe_data["inputs"]["node_features"]["pose_vectors"]
-                    per_trace_item["pn_angles"] = pe_data["angle_calculation_outputs"]["pn_angles"]
-                    per_trace_item["pn_evidence"] = pe_data["intermediates"]["pn_evidence"]
-                    per_trace_item["cd1_evidence"] = pe_data["intermediates"]["cd1_evidence"]
-                    per_trace_item["pn_weight"] = pe_data["intermediates"]["pn_weight"]
-                    per_trace_item["cd1_weight"] = pe_data["intermediates"]["cd1_weight"]
-                    per_trace_item["query_poses_fully_defined"] = pe_data["inputs"]["query_features"]["pose_fully_defined"]
-                    per_trace_item["node_poses_fully_defined"] = pe_data["inputs"]["node_features"]["pose_fully_defined"]
-                    per_trace_item["use_cd"] = per_trace_item["node_poses_fully_defined"][:, :, 0] * per_trace_item["query_poses_fully_defined"]
-                    per_trace_item["pose_evidence_weighted"] = pe_data["outputs"]["pose_evidence_weighted"]
-
-                # Add radius evidence max data
-                if ("radius_evidence_max" in trace["evidence_intermediates"]):
-                    final_data = trace["evidence_intermediates"]["radius_evidence_max"]
-                    per_trace_item["radius_evidence"] = final_data["inputs"]["radius_evidence"]
-                    per_trace_item["location_evidence"] = final_data["outputs"]["location_evidence"]
-
-                # Add evidence aggregation data
-                if ("evidence_aggregation" in trace["evidence_intermediates"]):
-                    evidence_data = trace["evidence_intermediates"]["evidence_aggregation"]
-                    per_trace_item["old_evidence"] = evidence_data["inputs"]["old_evidence"]
-                    per_trace_item["new_evidence"] = evidence_data["inputs"]["new_evidence"]
-                    per_trace_item["current_evidence"] = evidence_data["inputs"]["evidence_to_add"]
-                    per_trace_item["hyp_ids_to_test"] = evidence_data["inputs"]["hyp_ids_to_test"]
-                    per_trace_item["evidence_update_threshold"] = evidence_data["inputs"]["evidence_update_threshold"]
-                    per_trace_item["min_update"] = evidence_data["inputs"]["min_update"]
-                    per_trace_item["past_weight"] = evidence_data["inputs"]["past_weight"]
-                    per_trace_item["present_weight"] = evidence_data["inputs"]["present_weight"]
+            if "evidence_intermediates" in trace:
+                self._add_intermediate_data(per_trace_item, trace["evidence_intermediates"])
 
             self.per_trace_data.append(per_trace_item)
 
-        # Prepare stacked data if we have valid traces
         if self.valid_traces:
             self._prepare_stacked_data()
 
-    def _prepare_stacked_data(self):
-        """Prepare stacked data for batched GPU processing."""
-        # Collect all data and compute offsets
+    def _extract_base_trace_data(self, trace: Dict) -> Dict:
+        """Extract basic trace data that's always present."""
+        inputs = trace["inputs"]
+        return {
+            "poses": inputs["initial_hypotheses"]["poses"],
+            "locations": inputs["initial_hypotheses"]["locations"],
+            "evidence": inputs["initial_hypotheses"]["evidence"],
+            "displacement": inputs["channel_displacement"],
+            "trace": trace
+        }
 
-        # Pose transformation stacked data
+    def _add_intermediate_data(self, per_trace_item: Dict, intermediates: Dict):
+        """Add all available intermediate data to the per-trace item."""
+        if "pose_transformation" in intermediates:
+            self._add_pose_transformation_data(per_trace_item, intermediates["pose_transformation"])
+
+        if "nearest_neighbor_search" in intermediates:
+            self._add_knn_search_data(per_trace_item, intermediates["nearest_neighbor_search"])
+
+        if "distance_calculation" in intermediates:
+            self._add_distance_calculation_data(per_trace_item, intermediates["distance_calculation"])
+
+        if "pose_evidence_matrix" in intermediates:
+            self._add_pose_evidence_data(per_trace_item, intermediates["pose_evidence_matrix"])
+
+        if "radius_evidence_max" in intermediates:
+            self._add_radius_evidence_data(per_trace_item, intermediates["radius_evidence_max"])
+
+        if "evidence_aggregation" in intermediates:
+            self._add_evidence_aggregation_data(per_trace_item, intermediates["evidence_aggregation"])
+
+    def _add_pose_transformation_data(self, per_trace_item: Dict, pose_data: Dict):
+        """Add pose transformation data to per-trace item."""
+        inputs = pose_data["inputs"]
+        channel_features = inputs["channel_features"]
+
+        per_trace_item.update({
+            "channel_possible_poses": inputs["channel_possible_poses"],
+            "channel_features": channel_features,
+            "pose_vectors": channel_features["pose_vectors"]
+        })
+
+    def _add_knn_search_data(self, per_trace_item: Dict, nn_data: Dict):
+        """Add nearest neighbor search data to per-trace item."""
+        inputs = nn_data["inputs"]
+        outputs = nn_data["outputs"]
+
+        per_trace_item.update({
+            "graph_locations": inputs["graph_locations"],
+            "search_locations": inputs["search_locations"],
+            "nearest_node_ids": outputs["nearest_node_ids"]
+        })
+
+    def _add_distance_calculation_data(self, per_trace_item: Dict, dist_data: Dict):
+        """Add distance calculation data to per-trace item."""
+        inputs = dist_data["inputs"]
+        outputs = dist_data["outputs"]
+
+        per_trace_item.update({
+            "search_locations": inputs["search_locations"],
+            "nearest_node_locs": inputs["nearest_node_locs"],
+            "pose_normals": inputs["pose_normals"],
+            "max_abs_curvature": inputs["max_abs_curvature"],
+            "custom_distances": outputs["custom_nearest_node_dists"]
+        })
+
+    def _add_pose_evidence_data(self, per_trace_item: Dict, pe_data: Dict):
+        """Add pose evidence matrix data to per-trace item."""
+        inputs = pe_data["inputs"]
+        query_features = inputs["query_features"]
+        node_features = inputs["node_features"]
+        angle_outputs = pe_data["angle_calculation_outputs"]
+        intermediates = pe_data["intermediates"]
+        outputs = pe_data["outputs"]
+
+        # Extract pose vectors and fully defined flags
+        query_poses_fully_defined = query_features["pose_fully_defined"]
+        node_poses_fully_defined = node_features["pose_fully_defined"]
+
+        per_trace_item.update({
+            "query_pose_vectors": query_features["pose_vectors"],
+            "node_pose_vectors": node_features["pose_vectors"],
+            "pn_angles": angle_outputs["pn_angles"],
+            "pn_evidence": intermediates["pn_evidence"],
+            "cd1_evidence": intermediates["cd1_evidence"],
+            "pn_weight": intermediates["pn_weight"],
+            "cd1_weight": intermediates["cd1_weight"],
+            "query_poses_fully_defined": query_poses_fully_defined,
+            "node_poses_fully_defined": node_poses_fully_defined,
+            "use_cd": node_poses_fully_defined[:, :, 0] * query_poses_fully_defined,
+            "pose_evidence_weighted": outputs["pose_evidence_weighted"]
+        })
+
+    def _add_radius_evidence_data(self, per_trace_item: Dict, final_data: Dict):
+        """Add radius evidence max data to per-trace item."""
+        inputs = final_data["inputs"]
+        outputs = final_data["outputs"]
+
+        per_trace_item.update({
+            "radius_evidence": inputs["radius_evidence"],
+            "location_evidence": outputs["location_evidence"]
+        })
+
+    def _add_evidence_aggregation_data(self, per_trace_item: Dict, evidence_data: Dict):
+        """Add evidence aggregation data to per-trace item."""
+        inputs = evidence_data["inputs"]
+
+        per_trace_item.update({
+            "old_evidence": inputs["old_evidence"],
+            "new_evidence": inputs["new_evidence"],
+            "current_evidence": inputs["evidence_to_add"],
+            "hyp_ids_to_test": inputs["hyp_ids_to_test"],
+            "evidence_update_threshold": inputs["evidence_update_threshold"],
+            "min_update": inputs["min_update"],
+            "past_weight": inputs["past_weight"],
+            "present_weight": inputs["present_weight"]
+        })
+
+    def _prepare_stacked_data(self):
+        """Prepare stacked data for batched GPU processing.
+
+        Concatenates data from all valid traces into single tensors for efficient
+        batched GPU processing. Creates offset arrays to track boundaries between
+        different traces in the stacked tensors.
+
+        Populates self.stacked_data with GPU tensors and offset information.
+        """
+        pose_data, pose_offsets = self._collect_pose_data()
+        knn_data, knn_offsets = self._collect_knn_data()
+        evidence_data, evidence_offsets = self._collect_evidence_update_data()
+        pose_evidence_data, pose_evidence_offsets = self._collect_pose_evidence_data()
+
+        self.stacked_data = self._create_gpu_tensors(
+            pose_data, pose_offsets,
+            knn_data, knn_offsets,
+            evidence_data, evidence_offsets,
+            pose_evidence_data, pose_evidence_offsets
+        )
+
+        self._log_preparation_summary()
+
+    def _collect_pose_data(self):
+        """Collect pose transformation data from all traces."""
         all_poses = []
         all_locations = []
         all_evidence = []
         all_displacements = []
         all_channel_poses = []
-        hyp_offsets = [0]
-
-        # KNN stacked data
-        all_search_locs = []
-        all_nearest_locs = []
-        all_pose_normals = []
-        all_curvatures = []
-        distance_offsets = [0]
         all_channel_features = []
         all_pose_vectors = []
+        hyp_offsets = [0]
         pose_offsets = [0]
-
-        # Evidence update stacked data
-        stacked_evidence_update_threshold = []
-        stacked_hyp_test_ids = []
-        stacked_old_evidence = []
-        stacked_new_evidence = []
-        stacked_current_evidence = []
-        stacked_min_update = []
-        evidence_update_offsets = [0]
-
-        # Pose evidence stacked data
-        all_query_pose_vectors = []
-        all_node_pose_vectors = []
-        all_use_cd_masks = []
-        all_radius_evidence = []
-        pose_evidence_offsets = [0]
-        final_agg_offsets = [0]
-
-        # Radius evidence max
-
 
         for item in self.per_trace_data:
             all_poses.append(item["poses"])
@@ -228,88 +305,226 @@ class UnifiedStepData:
 
             all_channel_poses.append(item["channel_possible_poses"])
             all_channel_features.append(item["channel_features"])
-            # all_pose_vectors.append(item["pose_vectors"].unsqueeze(0).repeat(item["channel_possible_poses"].shape[0], 1, 1))
-            # all_pose_vectors.append(item["pose_vectors"].unsqueeze(0).repeat(item["channel_possible_poses"].shape[0], 1, 1))
-            all_pose_vectors.append(np.broadcast_to(item["pose_vectors"][None, :, :], (item["channel_possible_poses"].shape[0], 3, 3)))
+            all_pose_vectors.append(np.broadcast_to(
+                item["pose_vectors"][None, :, :],
+                (item["channel_possible_poses"].shape[0], 3, 3)
+            ))
             pose_offsets.append(pose_offsets[-1] + len(all_channel_poses[-1]))
-            # print(f"channel poses shape {all_channel_poses[-1].shape}")
-            # print(f"pose vectors shape {all_pose_vectors[-1].shape}")
+
+        return {
+            'poses': all_poses,
+            'locations': all_locations,
+            'evidence': all_evidence,
+            'displacements': all_displacements,
+            'channel_poses': all_channel_poses,
+            'channel_features': all_channel_features,
+            'pose_vectors': all_pose_vectors
+        }, {
+            'hyp_offsets': hyp_offsets,
+            'pose_offsets': pose_offsets
+        }
+
+    def _collect_knn_data(self):
+        """Collect KNN search data from traces that have it."""
+        all_search_locs = []
+        all_nearest_locs = []
+        all_pose_normals = []
+        all_curvatures = []
+        distance_offsets = [0]
+
+        for item in self.per_trace_data:
             if "search_locations" in item:
                 all_search_locs.append(item["search_locations"])
                 all_nearest_locs.append(item["nearest_node_locs"])
                 all_pose_normals.append(item["pose_normals"])
-                # print(type(item["pose_normals"]))
-                # print(type(item["max_abs_curvature"]))
-                # print(item["max_abs_curvature"])
                 all_curvatures.append(item["max_abs_curvature"])
                 distance_offsets.append(distance_offsets[-1] + len(item["search_locations"]))
+
+        return {
+            'search_locs': all_search_locs,
+            'nearest_locs': all_nearest_locs,
+            'pose_normals': all_pose_normals,
+            'curvatures': all_curvatures
+        }, {
+            'distance_offsets': distance_offsets
+        }
+
+    def _collect_evidence_update_data(self):
+        """Collect evidence update data from traces that have it."""
+        stacked_evidence_update_threshold = []
+        stacked_hyp_test_ids = []
+        stacked_old_evidence = []
+        stacked_new_evidence = []
+        stacked_current_evidence = []
+        stacked_min_update = []
+        evidence_update_offsets = [0]
+
+        for item in self.per_trace_data:
             if "old_evidence" in item:
                 stacked_old_evidence.append(item["old_evidence"])
                 stacked_new_evidence.append(item["new_evidence"])
                 stacked_current_evidence.append(item["current_evidence"])
                 evidence_length = item["current_evidence"].shape[0]
-                stacked_evidence_update_threshold.append(np.repeat(item["evidence_update_threshold"], evidence_length))
+                stacked_evidence_update_threshold.append(
+                    np.repeat(item["evidence_update_threshold"], evidence_length)
+                )
                 stacked_min_update.append(np.repeat(item["min_update"], evidence_length))
                 stacked_hyp_test_ids.append(item["hyp_ids_to_test"])
                 evidence_update_offsets.append(evidence_update_offsets[-1] + evidence_length)
 
+        return {
+            'evidence_update_threshold': stacked_evidence_update_threshold,
+            'hyp_test_ids': stacked_hyp_test_ids,
+            'old_evidence': stacked_old_evidence,
+            'new_evidence': stacked_new_evidence,
+            'current_evidence': stacked_current_evidence,
+            'min_update': stacked_min_update
+        }, {
+            'evidence_update_offsets': evidence_update_offsets
+        }
+
+    def _collect_pose_evidence_data(self):
+        """Collect pose evidence data from traces that have it."""
+        all_query_pose_vectors = []
+        all_node_pose_vectors = []
+        all_use_cd_masks = []
+        all_radius_evidence = []
+        pose_evidence_offsets = [0]
+        final_agg_offsets = [0]
+
+        for item in self.per_trace_data:
             # Add pose evidence data
             if "query_pose_vectors" in item and "node_pose_vectors" in item:
                 all_query_pose_vectors.append(item["query_pose_vectors"])
                 all_node_pose_vectors.append(item["node_pose_vectors"])
                 all_use_cd_masks.append(item["use_cd"])
-                pose_evidence_offsets.append(pose_evidence_offsets[-1] + len(item["query_pose_vectors"]))
+                pose_evidence_offsets.append(
+                    pose_evidence_offsets[-1] + len(item["query_pose_vectors"])
+                )
 
             # Add radius evidence max data
             if "radius_evidence" in item:
                 all_radius_evidence.append(item["radius_evidence"])
-                final_agg_offsets.append(final_agg_offsets[-1] + item["radius_evidence"].shape[0])
+                final_agg_offsets.append(
+                    final_agg_offsets[-1] + item["radius_evidence"].shape[0]
+                )
 
-        # Stack into GPU tensors
-        self.stacked_data = {
-            "poses": torch.from_numpy(np.concatenate(all_poses)).float().to(self.device),
-            "locations": torch.from_numpy(np.concatenate(all_locations)).float().to(self.device),
-            "evidence": torch.from_numpy(np.concatenate(all_evidence)).float().to(self.device),
-            "displacements": torch.from_numpy(np.stack(all_displacements)).float().to(self.device),
-            "hyp_offsets": torch.tensor(hyp_offsets, dtype=torch.int32, device=self.device),
-            "distance_offsets": torch.tensor(distance_offsets, dtype=torch.int32, device=self.device),
-            "search_locations": torch.from_numpy(np.concatenate(all_search_locs)).float().to(self.device),
-            "nearest_locations": torch.from_numpy(np.concatenate(all_nearest_locs)).float().to(self.device),
-            "pose_normals": torch.from_numpy(np.concatenate(all_pose_normals)).float().to(self.device),
-            "curvatures": torch.tensor(all_curvatures, device=self.device).float(),
-            "hyp_counts": torch.tensor([len(poses) for poses in all_poses], dtype=torch.int32, device=self.device),
-            "total_hypotheses": sum(len(poses) for poses in all_poses),
-            "num_traces": len(all_poses),
-            "channel_poses": torch.from_numpy(np.concatenate(all_channel_poses)).float().to(self.device),
-            "pose_offsets": torch.tensor(pose_offsets, dtype=torch.int32, device=self.device),
-            "pose_vectors": torch.from_numpy(np.concatenate(all_pose_vectors)).float().to(self.device),
-            "old_evidence": torch.from_numpy(np.concatenate(stacked_old_evidence)).float().to(self.device),
-            "new_evidence": torch.from_numpy(np.concatenate(stacked_new_evidence)).float().to(self.device),
-            "current_evidence": torch.from_numpy(np.concatenate(stacked_current_evidence)).float().to(self.device),
-            "evidence_update_thresholds": torch.from_numpy(np.concatenate(stacked_evidence_update_threshold)).float().to(self.device),
-            "hyp_test_ids": torch.from_numpy(np.concatenate(stacked_hyp_test_ids)).float().to(self.device),
-            "min_updates": torch.from_numpy(np.concatenate(stacked_min_update)).float().to(self.device),
-            "update_offsets": torch.tensor(evidence_update_offsets, dtype=torch.int32, device=self.device),
-            "query_pose_vectors": torch.from_numpy(np.concatenate(all_query_pose_vectors)).float().to(self.device),
-            "node_pose_vectors": torch.from_numpy(np.concatenate(all_node_pose_vectors)).float().to(self.device),
-            "use_cd_masks": torch.from_numpy(np.concatenate(all_use_cd_masks)).float().to(self.device),
-            "pose_evidence_offsets": torch.tensor(pose_evidence_offsets, dtype=torch.int32, device=self.device),
-            "radius_evidence": torch.from_numpy(np.concatenate(all_radius_evidence)).float().to(self.device),
-            "final_agg_offsets": torch.tensor(final_agg_offsets, dtype=torch.int32, device=self.device),
+        return {
+            'query_pose_vectors': all_query_pose_vectors,
+            'node_pose_vectors': all_node_pose_vectors,
+            'use_cd_masks': all_use_cd_masks,
+            'radius_evidence': all_radius_evidence
+        }, {
+            'pose_evidence_offsets': pose_evidence_offsets,
+            'final_agg_offsets': final_agg_offsets
         }
 
+    def _numpy_to_gpu_tensor(self, arrays, dtype=torch.float32, stack=False):
+        """Convert list of numpy arrays to concatenated GPU tensor.
+
+        Args:
+            arrays: List of numpy arrays to concatenate/stack
+            dtype: Target torch dtype (default: float32)
+            stack: If True, use np.stack instead of np.concatenate
+
+        Returns:
+            torch.Tensor on GPU device
+        """
+        if stack:
+            combined = np.stack(arrays)
+        else:
+            combined = np.concatenate(arrays)
+        return torch.from_numpy(combined).to(dtype=dtype, device=self.device)
+
+    def _create_gpu_tensors(self, pose_data, pose_offsets, knn_data, knn_offsets,
+                        evidence_data, evidence_offsets, pose_evidence_data,
+                        pose_evidence_offsets):
+        """Convert collected numpy arrays to GPU tensors."""
+        stacked_data = {
+            "poses": self._numpy_to_gpu_tensor(pose_data['poses']),
+            "locations": self._numpy_to_gpu_tensor(pose_data['locations']),
+            "evidence": self._numpy_to_gpu_tensor(pose_data['evidence']),
+            "displacements": self._numpy_to_gpu_tensor(pose_data['displacements'], stack=True),
+            "hyp_offsets": torch.tensor(pose_offsets['hyp_offsets'], dtype=torch.int32, device=self.device),
+            "channel_poses": self._numpy_to_gpu_tensor(pose_data['channel_poses']),
+            "pose_offsets": torch.tensor(pose_offsets['pose_offsets'], dtype=torch.int32, device=self.device),
+            "pose_vectors": self._numpy_to_gpu_tensor(pose_data['pose_vectors']),
+            "hyp_counts": torch.tensor([len(poses) for poses in pose_data['poses']], dtype=torch.int32, device=self.device),
+            "total_hypotheses": sum(len(poses) for poses in pose_data['poses']),
+            "num_traces": len(pose_data['poses']),
+        }
+
+        # Add KNN data if available
+        if knn_data['search_locs']:
+            stacked_data.update({
+                "distance_offsets": torch.tensor(knn_offsets['distance_offsets'], dtype=torch.int32, device=self.device),
+                "search_locations": self._numpy_to_gpu_tensor(knn_data['search_locs']),
+                "nearest_locations": self._numpy_to_gpu_tensor(knn_data['nearest_locs']),
+                "pose_normals": self._numpy_to_gpu_tensor(knn_data['pose_normals']),
+                "curvatures": torch.tensor(knn_data['curvatures'], device=self.device).float(),
+            })
+
+        # Add evidence update data if available
+        if evidence_data['old_evidence']:
+            stacked_data.update({
+                "old_evidence": self._numpy_to_gpu_tensor(evidence_data['old_evidence']),
+                "new_evidence": self._numpy_to_gpu_tensor(evidence_data['new_evidence']),
+                "current_evidence": self._numpy_to_gpu_tensor(evidence_data['current_evidence']),
+                "evidence_update_thresholds": self._numpy_to_gpu_tensor(evidence_data['evidence_update_threshold']),
+                "hyp_test_ids": self._numpy_to_gpu_tensor(evidence_data['hyp_test_ids']),
+                "min_updates": self._numpy_to_gpu_tensor(evidence_data['min_update']),
+                "update_offsets": torch.tensor(evidence_offsets['evidence_update_offsets'], dtype=torch.int32, device=self.device),
+            })
+
+        # Add pose evidence data if available
+        if pose_evidence_data['query_pose_vectors']:
+            stacked_data.update({
+                "query_pose_vectors": self._numpy_to_gpu_tensor(pose_evidence_data['query_pose_vectors']),
+                "node_pose_vectors": self._numpy_to_gpu_tensor(pose_evidence_data['node_pose_vectors']),
+                "use_cd_masks": self._numpy_to_gpu_tensor(pose_evidence_data['use_cd_masks']),
+                "pose_evidence_offsets": torch.tensor(pose_evidence_offsets['pose_evidence_offsets'], dtype=torch.int32, device=self.device),
+            })
+
+        # Add radius evidence data if available
+        if pose_evidence_data['radius_evidence']:
+            stacked_data.update({
+                "radius_evidence": self._numpy_to_gpu_tensor(pose_evidence_data['radius_evidence']),
+                "final_agg_offsets": torch.tensor(pose_evidence_offsets['final_agg_offsets'], dtype=torch.int32, device=self.device),
+            })
+
+        return stacked_data
+
+    def _log_preparation_summary(self):
+        """Log summary of data preparation."""
         print(f"Prepared unified data: {self.num_valid_traces} valid traces, {self.stacked_data['total_hypotheses']} total hypotheses")
 
+
     def get_per_trace_item(self, idx: int) -> Dict:
-        """Get per-trace data for a specific trace."""
+        """Get per-trace data for a specific trace.
+
+        Args:
+            idx: Index of the trace to retrieve.
+
+        Returns:
+            Dictionary containing computation data for the specified trace.
+        """
         return self.per_trace_data[idx]
 
     def get_stacked_tensors(self) -> Dict:
-        """Get stacked tensors for batched processing."""
+        """Get stacked tensors for batched processing.
+
+        Returns:
+            Dictionary containing stacked GPU tensors and offset arrays for
+            batched processing. Returns None if no valid traces exist.
+        """
         return self.stacked_data
 
     def cleanup(self):
-        """Cleanup GPU memory."""
+        """Cleanup GPU memory.
+
+        Releases GPU memory by deleting tensors and clearing CUDA cache.
+        Should be called after processing is complete to prevent memory leaks.
+        """
         try:
             # Cleanup stacked tensors
             if self.stacked_data:
@@ -339,12 +554,25 @@ class UnifiedStepData:
             print(f"Warning: Error during cleanup: {e}")
 
     def __del__(self):
-        """Cleanup when object is garbage collected."""
+        """Cleanup when object is garbage collected.
+
+        Ensures GPU memory is released when the object is destroyed.
+        """
         self.cleanup()
 
 
 class MontyOperations:
-    """Implementation of Monty operations with GPU and CPU implementations."""
+    """Implementation of Monty operations with GPU and CPU implementations.
+
+    This class provides both CPU and GPU implementations for various computational
+    operations used in the Monty system. Each operation typically has three variants:
+    - CPU implementation (matching original Monty code)
+    - GPU per-trace implementation (processing one trace at a time)
+    - GPU batched implementation (processing multiple traces in parallel)
+
+    Attributes:
+        device: PyTorch device (CPU or CUDA) for tensor operations.
+    """
 
     def __init__(self, device: torch.device):
         self.device = device
@@ -355,7 +583,21 @@ class MontyOperations:
 
     def displacement_gpu(self, poses: torch.Tensor, locations: torch.Tensor,
                         displacement: torch.Tensor) -> Tuple[torch.Tensor, float]:
-        """GPU implementation of displacement calculation using CUDA kernels."""
+        """GPU implementation of displacement calculation using CUDA kernels.
+
+        Args:
+            poses: Tensor of pose rotations, shape (N, 3, 3).
+            locations: Tensor of hypothesis locations, shape (N, 3).
+            displacement: Tensor of displacement vector, shape (3,).
+
+        Returns:
+            Tuple containing:
+            - Search locations after applying rotated displacements, shape (N, 3).
+            - GPU execution time in seconds.
+
+        Raises:
+            RuntimeError: If CUDA kernels are not available.
+        """
         if monty_cuda is None:
             raise RuntimeError("CUDA kernels not available")
 
@@ -375,7 +617,18 @@ class MontyOperations:
 
     def displacement_cpu(self, poses: np.ndarray, locations: np.ndarray,
                         displacement: np.ndarray) -> Tuple[np.ndarray, float]:
-        """CPU implementation matching Monty codebase exactly."""
+        """CPU implementation matching Monty codebase exactly.
+
+        Args:
+            poses: Array of pose rotations, shape (N, 3, 3).
+            locations: Array of hypothesis locations, shape (N, 3).
+            displacement: Array of displacement vector, shape (3,).
+
+        Returns:
+            Tuple containing:
+            - Search locations after applying rotated displacements, shape (N, 3).
+            - CPU execution time in seconds.
+        """
         start_time = time.perf_counter()
 
         rotated_displacements = np.dot(poses, displacement)  # (N, 3)
@@ -386,7 +639,20 @@ class MontyOperations:
         return search_locations, cpu_time
 
     def displacement_gpu_batched(self, unified_data: UnifiedStepData) -> Tuple[torch.Tensor, float]:
-        """Batched GPU displacement - single kernel call for all traces."""
+        """Batched GPU displacement - single kernel call for all traces.
+
+        Args:
+            unified_data: UnifiedStepData containing stacked tensors for all traces.
+
+        Returns:
+            Tuple containing:
+            - Search locations for all traces concatenated, shape (total_hypotheses, 3).
+            - Hypothesis offsets to separate results by trace.
+            - GPU execution time in seconds.
+
+        Raises:
+            RuntimeError: If CUDA kernels are not available.
+        """
         if monty_cuda is None:
             raise RuntimeError("CUDA kernels not available")
 
@@ -421,7 +687,21 @@ class MontyOperations:
     def knn_search_gpu(self, search_locations: torch.Tensor,
                       graph_locations: torch.Tensor,
                       k: int = 3) -> Tuple[torch.Tensor, float]:
-        """GPU implementation of KNN search using CUDA kernels."""
+        """GPU implementation of KNN search using CUDA kernels.
+
+        Args:
+            search_locations: Query locations to find nearest neighbors for, shape (N, 3).
+            graph_locations: Reference locations to search within, shape (M, 3).
+            k: Number of nearest neighbors to find (default: 3).
+
+        Returns:
+            Tuple containing:
+            - Indices of k nearest neighbors for each query, shape (N, k).
+            - GPU execution time in seconds.
+
+        Raises:
+            RuntimeError: If CUDA kernels are not available.
+        """
         if monty_cuda is None:
             raise RuntimeError("CUDA kernels not available")
 
@@ -443,7 +723,18 @@ class MontyOperations:
     def knn_search_cpu(self, search_locations: np.ndarray,
                       graph_locations: np.ndarray,
                       k: int = 3) -> Tuple[np.ndarray, float]:
-        """CPU implementation using cKDTree (matches Monty)."""
+        """CPU implementation using cKDTree (matches Monty).
+
+        Args:
+            search_locations: Query locations to find nearest neighbors for, shape (N, 3).
+            graph_locations: Reference locations to search within, shape (M, 3).
+            k: Number of nearest neighbors to find (default: 3).
+
+        Returns:
+            Tuple containing:
+            - Indices of k nearest neighbors for each query, shape (N, k).
+            - CPU execution time in seconds.
+        """
         tree = cKDTree(graph_locations)
         start_time = time.perf_counter()
         _, nearest_indices = tree.query(search_locations, k=k)
@@ -459,7 +750,23 @@ class MontyOperations:
                               search_locations: torch.Tensor,
                               graph_locations: torch.Tensor,
                               k: int = 3) -> Tuple[torch.Tensor, float]:
-        """Batched GPU KNN search - single kernel call for all traces."""
+        """Batched GPU KNN search - single kernel call for all traces.
+
+        Args:
+            unified_data: UnifiedStepData containing stacked tensors for all traces.
+            search_locations: Stacked query locations for all traces.
+            graph_locations: Reference locations to search within.
+            k: Number of nearest neighbors to find (default: 3).
+
+        Returns:
+            Tuple containing:
+            - Indices of k nearest neighbors for all queries, shape (total_queries, k).
+            - Hypothesis offsets to separate results by trace.
+            - GPU execution time in seconds.
+
+        Raises:
+            RuntimeError: If CUDA kernels are not available.
+        """
         if monty_cuda is None:
             raise RuntimeError("CUDA kernels not available")
 
@@ -492,7 +799,22 @@ class MontyOperations:
                                 nearest_locations: torch.Tensor,
                                 pose_normals: torch.Tensor,
                                 curvature: float) -> Tuple[torch.Tensor, float]:
-        """GPU implementation of custom distance calculation using CUDA kernels."""
+        """GPU implementation of custom distance calculation using CUDA kernels.
+
+        Args:
+            search_locations: Query locations, shape (N, 3).
+            nearest_locations: Nearest neighbor locations, shape (N, K, 3).
+            pose_normals: Normal vectors for queries, shape (N, 3).
+            curvature: Maximum absolute curvature value.
+
+        Returns:
+            Tuple containing:
+            - Custom distances incorporating curvature, shape (N, K).
+            - GPU execution time in seconds.
+
+        Raises:
+            RuntimeError: If CUDA kernels are not available.
+        """
         if monty_cuda is None:
             raise RuntimeError("CUDA kernels not available")
 
@@ -516,7 +838,19 @@ class MontyOperations:
                                 nearest_locations: np.ndarray,
                                 pose_normals: np.ndarray,
                                 curvature: float) -> Tuple[np.ndarray, float]:
-        """CPU implementation matching Monty's get_custom_distances."""
+        """CPU implementation matching Monty's get_custom_distances.
+
+        Args:
+            search_locations: Query locations, shape (N, 3).
+            nearest_locations: Nearest neighbor locations, shape (N, K, 3).
+            pose_normals: Normal vectors for queries, shape (N, 3).
+            curvature: Maximum absolute curvature value.
+
+        Returns:
+            Tuple containing:
+            - Custom distances incorporating curvature, shape (N, K).
+            - CPU execution time in seconds.
+        """
         start_time = time.perf_counter()
 
         # Exact CPU implementation from original script
@@ -538,7 +872,20 @@ class MontyOperations:
                                     #    pose_normals: torch.Tensor,
                                     #    curvatures: List[float]
                                        ) -> Tuple[torch.Tensor, float]:
-        """Batched GPU distance calculation - single kernel call for all traces."""
+        """Batched GPU distance calculation - single kernel call for all traces.
+
+        Args:
+            unified_data: UnifiedStepData containing stacked tensors for all traces.
+
+        Returns:
+            Tuple containing:
+            - Custom distances for all traces concatenated.
+            - Distance offsets to separate results by trace.
+            - GPU execution time in seconds.
+
+        Raises:
+            RuntimeError: If CUDA kernels are not available.
+        """
         if monty_cuda is None:
             raise RuntimeError("CUDA kernels not available")
 
@@ -571,7 +918,22 @@ class MontyOperations:
                          node_poses: torch.Tensor,
                          use_cd_mask: torch.Tensor,
                          weights: torch.Tensor) -> Tuple[torch.Tensor, float]:
-        """GPU implementation of pose evidence calculation using CUDA kernels."""
+        """GPU implementation of pose evidence calculation using CUDA kernels.
+
+        Args:
+            query_poses: Query pose vectors, shape (N, 2, 3).
+            node_poses: Node pose vectors, shape (N, K, 9).
+            use_cd_mask: Mask indicating whether to use curvature direction evidence.
+            weights: Weight values for pose normal and curvature direction evidence.
+
+        Returns:
+            Tuple containing:
+            - Weighted pose evidence values, shape (N, K).
+            - GPU execution time in seconds.
+
+        Raises:
+            RuntimeError: If CUDA kernels are not available.
+        """
         if monty_cuda is None:
             raise RuntimeError("CUDA kernels not available")
 
@@ -605,7 +967,20 @@ class MontyOperations:
                          use_cd: np.ndarray,
                          query_poses_full_defined: bool,
                          weights: np.ndarray) -> Tuple[np.ndarray, float]:
-        """CPU implementation matching Monty's pose evidence calculation."""
+        """CPU implementation matching Monty's pose evidence calculation.
+
+        Args:
+            query_poses: Query pose vectors, shape (N, 2, 3).
+            node_poses: Node pose vectors, shape (N, K, 9).
+            use_cd: Array indicating whether to use curvature direction evidence.
+            query_poses_full_defined: Whether query poses are fully defined.
+            weights: Weight values for pose normal and curvature direction evidence.
+
+        Returns:
+            Tuple containing:
+            - Weighted pose evidence values, shape (N, K).
+            - CPU execution time in seconds.
+        """
         query_normals = query_poses[:, 0]  # Take first pose vector
         node_normals = node_poses[:, :, :3]
 
@@ -635,7 +1010,20 @@ class MontyOperations:
 
     def pose_evidence_gpu_batched(self, unified_data: UnifiedStepData,
                                 weights: np.ndarray) -> Tuple[torch.Tensor, float]:
-        """Batched GPU pose evidence - single kernel call for all traces."""
+        """Batched GPU pose evidence - single kernel call for all traces.
+
+        Args:
+            unified_data: UnifiedStepData containing stacked tensors for all traces.
+            weights: Weight values for pose normal and curvature direction evidence.
+
+        Returns:
+            Tuple containing:
+            - Weighted pose evidence for all traces concatenated.
+            - GPU execution time in seconds.
+
+        Raises:
+            RuntimeError: If CUDA kernels are not available.
+        """
         if monty_cuda is None:
             raise RuntimeError("CUDA kernels not available")
 
@@ -678,7 +1066,19 @@ class MontyOperations:
     # =================================================================
 
     def radius_evidence_max_gpu(self, evidence_matrix: torch.Tensor) -> Tuple[torch.Tensor, float]:
-        """GPU implementation of radius evidence max using CUDA kernels."""
+        """GPU implementation of radius evidence max using CUDA kernels.
+
+        Args:
+            evidence_matrix: Evidence values, shape (N, K).
+
+        Returns:
+            Tuple containing:
+            - Maximum evidence value for each hypothesis, shape (N,).
+            - GPU execution time in seconds.
+
+        Raises:
+            RuntimeError: If CUDA kernels are not available.
+        """
         if monty_cuda is None:
             raise RuntimeError("CUDA kernels not available")
 
@@ -693,7 +1093,16 @@ class MontyOperations:
         return final_evidence, gpu_time
 
     def radius_evidence_max_cpu(self, evidence_matrix: np.ndarray) -> Tuple[np.ndarray, float]:
-        """CPU implementation of radius evidence max."""
+        """CPU implementation of radius evidence max.
+
+        Args:
+            evidence_matrix: Evidence values, shape (N, K).
+
+        Returns:
+            Tuple containing:
+            - Maximum evidence value for each hypothesis, shape (N,).
+            - CPU execution time in seconds.
+        """
         start_time = time.perf_counter()
 
         final_evidence = np.max(evidence_matrix, axis=1)
@@ -703,7 +1112,19 @@ class MontyOperations:
         return final_evidence, cpu_time
 
     def radius_evidence_max_gpu_batched(self, unified_data: UnifiedStepData) -> Tuple[torch.Tensor, float]:
-        """Batched GPU radius evidence max - single kernel call for all traces."""
+        """Batched GPU radius evidence max - single kernel call for all traces.
+
+        Args:
+            unified_data: UnifiedStepData containing stacked tensors for all traces.
+
+        Returns:
+            Tuple containing:
+            - Maximum evidence values for all traces concatenated.
+            - GPU execution time in seconds.
+
+        Raises:
+            RuntimeError: If CUDA kernels are not available.
+        """
         if monty_cuda is None:
             raise RuntimeError("CUDA kernels not available")
 
@@ -729,7 +1150,20 @@ class MontyOperations:
 
     def pose_transformation_gpu(self, pose_vectors: torch.Tensor,
                                reference_poses: torch.Tensor) -> Tuple[torch.Tensor, float]:
-        """GPU implementation of pose transformation using CUDA kernels."""
+        """GPU implementation of pose transformation using CUDA kernels.
+
+        Args:
+            pose_vectors: Pose vectors to transform, shape (3, 3).
+            reference_poses: Reference poses for transformation, shape (N, 3, 3).
+
+        Returns:
+            Tuple containing:
+            - Transformed pose vectors, shape (N, 3, 3).
+            - GPU execution time in seconds.
+
+        Raises:
+            RuntimeError: If CUDA kernels are not available.
+        """
         if monty_cuda is None:
             raise RuntimeError("CUDA kernels not available")
 
@@ -747,7 +1181,17 @@ class MontyOperations:
 
     def pose_transformation_cpu(self, pose_vectors: np.ndarray,
                                reference_poses: np.ndarray) -> Tuple[np.ndarray, float]:
-        """CPU implementation matching rotate_pose_dependent_features exactly."""
+        """CPU implementation matching rotate_pose_dependent_features exactly.
+
+        Args:
+            pose_vectors: Pose vectors to transform, shape (3, 3).
+            reference_poses: Reference poses for transformation, shape (N, 3, 3).
+
+        Returns:
+            Tuple containing:
+            - Transformed pose vectors, shape (N, 3, 3).
+            - CPU execution time in seconds.
+        """
         start_time = time.perf_counter()
 
         pose_vectors_T = pose_vectors.T
@@ -759,7 +1203,20 @@ class MontyOperations:
         return transformed_vectors, cpu_time
 
     def pose_transformation_gpu_batched(self, unified_data: UnifiedStepData) -> Tuple[torch.Tensor, torch.Tensor, float]:
-        """Batched GPU pose transformation - single kernel call for all traces."""
+        """Batched GPU pose transformation - single kernel call for all traces.
+
+        Args:
+            unified_data: UnifiedStepData containing stacked tensors for all traces.
+
+        Returns:
+            Tuple containing:
+            - Transformed pose vectors for all traces concatenated.
+            - Pose offsets to separate results by trace.
+            - GPU execution time in seconds.
+
+        Raises:
+            RuntimeError: If CUDA kernels are not available.
+        """
         if monty_cuda is None:
             raise RuntimeError("CUDA kernels not available")
 
@@ -789,7 +1246,24 @@ class MontyOperations:
                                 new_evidence: torch.Tensor, test_indices: torch.Tensor,
                                 min_update: float, past_weight: float,
                                 present_weight: float) -> Tuple[torch.Tensor, float]:
-        """GPU implementation of evidence aggregation using CUDA kernels."""
+        """GPU implementation of evidence aggregation using CUDA kernels.
+
+        Args:
+            old_evidence: Previous evidence values.
+            new_evidence: New evidence values to aggregate.
+            test_indices: Indices of hypotheses to update.
+            min_update: Minimum update value for non-tested hypotheses.
+            past_weight: Weight for previous evidence.
+            present_weight: Weight for new evidence.
+
+        Returns:
+            Tuple containing:
+            - Aggregated evidence values.
+            - GPU execution time in seconds.
+
+        Raises:
+            RuntimeError: If CUDA kernels are not available.
+        """
         if monty_cuda is None:
             raise RuntimeError("CUDA kernels not available")
 
@@ -810,7 +1284,21 @@ class MontyOperations:
                                 new_evidence: np.ndarray, test_indices: np.ndarray,
                                 min_update: float, past_weight: float,
                                 present_weight: float) -> Tuple[np.ndarray, float]:
-        """CPU implementation matching Monty evidence aggregation exactly."""
+        """CPU implementation matching Monty evidence aggregation exactly.
+
+        Args:
+            old_evidence: Previous evidence values.
+            new_evidence: New evidence values to aggregate.
+            test_indices: Indices of hypotheses to update.
+            min_update: Minimum update value for non-tested hypotheses.
+            past_weight: Weight for previous evidence.
+            present_weight: Weight for new evidence.
+
+        Returns:
+            Tuple containing:
+            - Aggregated evidence values.
+            - CPU execution time in seconds.
+        """
         start_time = time.perf_counter()
 
         evidence_to_add = np.ones_like(old_evidence) * min_update
@@ -825,7 +1313,22 @@ class MontyOperations:
     def evidence_aggregation_gpu_batched(self, unified_data: UnifiedStepData,
                                         past_weight: float,
                                        present_weight: float) -> Tuple[torch.Tensor, torch.Tensor, float]:
-        """Batched GPU evidence aggregation - single kernel call for all traces."""
+        """Batched GPU evidence aggregation - single kernel call for all traces.
+
+        Args:
+            unified_data: UnifiedStepData containing stacked tensors for all traces.
+            past_weight: Weight for previous evidence.
+            present_weight: Weight for new evidence.
+
+        Returns:
+            Tuple containing:
+            - Aggregated evidence for all traces concatenated.
+            - Update offsets to separate results by trace.
+            - GPU execution time in seconds.
+
+        Raises:
+            RuntimeError: If CUDA kernels are not available.
+        """
         if monty_cuda is None:
             raise RuntimeError("CUDA kernels not available")
 
@@ -857,7 +1360,14 @@ class MontyOperations:
 
 
     def _memory_cleanup(self):
-        """Aggressive GPU memory cleanup to prevent accumulation."""
+        """Aggressive GPU memory cleanup to prevent accumulation.
+
+        Performs the following cleanup operations:
+        - Clears CUDA cache
+        - Forces Python garbage collection
+        - Resets peak memory statistics
+        - Prints current memory usage
+        """
         if self.device.type != "cuda":
             return
 
@@ -876,7 +1386,16 @@ class MontyOperations:
         print(f"    Post-cleanup memory: {allocated:.1f}MB allocated, {cached:.1f}MB cached")
 
     def _get_gpu_memory_info(self) -> Dict[str, Any]:
-        """Get current GPU memory information."""
+        """Get current GPU memory information.
+
+        Returns:
+            Dictionary containing memory statistics including:
+            - allocated_mb: Currently allocated GPU memory in MB
+            - cached_mb: Currently cached GPU memory in MB
+            - max_allocated_mb: Maximum allocated memory during execution
+            - max_cached_mb: Maximum cached memory during execution
+            Returns CPU info dict if not using CUDA.
+        """
         if self.device.type != "cuda":
             return {"type": "cpu", "note": "CPU execution, no GPU memory"}
 
@@ -901,7 +1420,26 @@ class MontyOperations:
 
 def run_step_analysis(traces: List[Dict], operations: MontyOperations,
                      target_function: Optional[str] = None, group_by_lm: bool = False) -> Dict[str, Any]:
-    """Run per-step analysis comparing CPU, GPU Per-Trace, and GPU Batched."""
+    """Run per-step analysis comparing CPU, GPU Per-Trace, and GPU Batched.
+
+    Groups traces by step and compares performance of CPU vs GPU implementations.
+
+    Args:
+        traces: List of computation traces from profiling.
+        operations: MontyOperations instance with GPU/CPU implementations.
+        target_function: Specific function to test (optional).
+        group_by_lm: Whether to group traces by learning module.
+
+    Returns:
+        Dictionary containing:
+        - num_steps: Number of steps processed
+        - total_traces: Total number of traces
+        - functions_tested: List of functions tested
+        - total_cpu_time: Total CPU execution time
+        - total_gpu_per_trace_time: Total GPU per-trace time
+        - total_gpu_batched_time: Total GPU batched time
+        - step_results: Detailed results for each step
+    """
     # Group traces by step for all hypotheses that can run in parallel
     traces_by_step = {}
     for trace in traces:
@@ -1002,7 +1540,16 @@ def run_step_analysis(traces: List[Dict], operations: MontyOperations,
 
 def process_function_all_approaches(func_name: str, unified_data: UnifiedStepData,
                                    operations: MontyOperations) -> bool:
-    """Process a single function with CPU, GPU per-trace, and GPU batched implementations."""
+    """Process a single function with CPU, GPU per-trace, and GPU batched implementations.
+
+    Args:
+        func_name: Name of the function to test.
+        unified_data: UnifiedStepData containing trace data.
+        operations: MontyOperations instance with implementations.
+
+    Returns:
+        True if function was successfully tested, False otherwise.
+    """
     print(f"  Testing {func_name}...")
 
     try:
@@ -1031,7 +1578,18 @@ def process_function_all_approaches(func_name: str, unified_data: UnifiedStepDat
 
 def process_displacement_all_approaches(unified_data: UnifiedStepData,
                                        operations: MontyOperations) -> bool:
-    """Process displacement with CPU, GPU per-trace, and GPU batched approaches."""
+    """Process displacement with CPU, GPU per-trace, and GPU batched approaches.
+
+    Tests displacement calculation across all three implementation types and
+    verifies results match between CPU and GPU versions.
+
+    Args:
+        unified_data: UnifiedStepData containing trace data.
+        operations: MontyOperations instance with implementations.
+
+    Returns:
+        True if all tests passed successfully.
+    """
     all_search_locations_cpu = []
     all_search_locations_gpu_per_trace = []
     total_cpu_time = 0
@@ -1129,7 +1687,17 @@ def process_displacement_all_approaches(unified_data: UnifiedStepData,
 
 def process_knn_search_all_approaches(unified_data: UnifiedStepData,
                                      operations: MontyOperations) -> bool:
-    """Process KNN search with CPU, GPU per-trace, and GPU batched approaches."""
+    """Process KNN search with CPU, GPU per-trace, and GPU batched approaches.
+
+    Tests k-nearest neighbor search across all implementation types.
+
+    Args:
+        unified_data: UnifiedStepData containing trace data.
+        operations: MontyOperations instance with implementations.
+
+    Returns:
+        True if all tests passed successfully.
+    """
     # CPU and GPU Per-Trace processing
     all_nearest_indices_cpu = []
     all_nearest_indices_gpu_per_trace = []
@@ -1727,46 +2295,61 @@ def process_evidence_aggregation_all_approaches(unified_data: UnifiedStepData,
     return True
 
 def extract_experiment_name(output_dir: str) -> str:
-    """Extract experiment name from output directory path."""
+    """Extract experiment name from output directory path.
+
+    Args:
+        output_dir: Path to experiment output directory.
+
+    Returns:
+        Experiment name extracted from the directory path.
+    """
     path = Path(output_dir)
     return path.name
 
 
 def log_performance_to_csv(results: Dict[str, Any], experiment_name: str, csv_file: str = "gpu_performance_data.csv"):
-    """Log performance results to CSV for plotting and analysis."""
+    """Log performance results to CSV for plotting and analysis.
 
+    Creates or appends to a CSV file with detailed performance metrics
+    for each function and step tested.
+
+    Args:
+        results: Dictionary containing analysis results.
+        experiment_name: Name of the experiment for labeling.
+        csv_file: Path to CSV file (default: "gpu_performance_data.csv").
+    """
     # Define CSV columns
     fieldnames = [
-        'experiment_name', 'step', 'function_name', 'num_traces', 'total_hypotheses',
-        'cpu_time_ms', 'gpu_per_trace_time_ms', 'gpu_batched_time_ms',
-        'per_trace_speedup', 'batched_speedup', 'batch_vs_pertrace_speedup',
-        'verification_percent_per_trace_passed', 'verification_percent_stacked_passed', 'max_diff', 'max_batched_diff', 'timestamp'
+        "experiment_name", "step", "function_name", "num_traces", "total_hypotheses",
+        "cpu_time_ms", "gpu_per_trace_time_ms", "gpu_batched_time_ms",
+        "per_trace_speedup", "batched_speedup", "batch_vs_pertrace_speedup",
+        "verification_percent_per_trace_passed", "verification_percent_stacked_passed", "max_diff", "max_batched_diff", "timestamp"
     ]
 
     # Check if CSV exists, create with headers if not
     csv_path = Path(csv_file)
     write_header = not csv_path.exists()
 
-    with open(csv_path, 'a', newline='') as f:
+    with open(csv_path, "a", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
 
         if write_header:
             writer.writeheader()
             print(f"Created performance log: {csv_path.absolute()}")
 
-        timestamp = time.strftime('%Y-%m-%d %H:%M:%S')
+        timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
 
         # Log data for each step and function
-        for step_result in results['step_results']:
-            step = step_result['step']
-            num_traces = step_result['num_traces']
-            total_hypotheses = step_result['total_hypotheses']
+        for step_result in results["step_results"]:
+            step = step_result["step"]
+            num_traces = step_result["num_traces"]
+            total_hypotheses = step_result["total_hypotheses"]
 
             # Log per-function timing data
-            for func_name in results['functions_tested']:
-                cpu_time = step_result['cpu_times'].get(func_name, 0) * 1000  # Convert to ms
-                gpu_per_trace_time = step_result['gpu_per_trace_times'].get(func_name, 0) * 1000
-                gpu_batched_time = step_result['gpu_batched_times'].get(func_name, 0) * 1000
+            for func_name in results["functions_tested"]:
+                cpu_time = step_result["cpu_times"].get(func_name, 0) * 1000  # Convert to ms
+                gpu_per_trace_time = step_result["gpu_per_trace_times"].get(func_name, 0) * 1000
+                gpu_batched_time = step_result["gpu_batched_times"].get(func_name, 0) * 1000
 
                 # Calculate speedups
                 per_trace_speedup = cpu_time / gpu_per_trace_time if gpu_per_trace_time > 0 else 0
@@ -1774,37 +2357,41 @@ def log_performance_to_csv(results: Dict[str, Any], experiment_name: str, csv_fi
                 batch_vs_pertrace = gpu_per_trace_time / gpu_batched_time if gpu_batched_time > 0 else 0
 
                 # Get verification results
-                verification = step_result['verification_results'].get(func_name, {})
-                verification_percent_per_trace_passed = verification.get('percent_per_trace_passed', 0)
-                verification_percent_stacked_passed = verification.get('percent_stacked_passed', 0)
-                max_diff = verification.get('max_diff', verification.get('per_trace_max_diff', 0))
-                max_batched_diff = verification.get('max_batched_diff', 0)
+                verification = step_result["verification_results"].get(func_name, {})
+                verification_percent_per_trace_passed = verification.get("percent_per_trace_passed", 0)
+                verification_percent_stacked_passed = verification.get("percent_stacked_passed", 0)
+                max_diff = verification.get("max_diff", verification.get("per_trace_max_diff", 0))
+                max_batched_diff = verification.get("max_batched_diff", 0)
 
                 # Write row to CSV
                 writer.writerow({
-                    'experiment_name': experiment_name,
-                    'step': step,
-                    'function_name': func_name,
-                    'num_traces': num_traces,
-                    'total_hypotheses': total_hypotheses,
-                    'cpu_time_ms': f"{cpu_time:.3f}",
-                    'gpu_per_trace_time_ms': f"{gpu_per_trace_time:.3f}",
-                    'gpu_batched_time_ms': f"{gpu_batched_time:.3f}",
-                    'per_trace_speedup': f"{per_trace_speedup:.2f}",
-                    'batched_speedup': f"{batched_speedup:.2f}",
-                    'batch_vs_pertrace_speedup': f"{batch_vs_pertrace:.2f}",
-                    'verification_percent_per_trace_passed': verification_percent_per_trace_passed,
-                    'verification_percent_stacked_passed': verification_percent_stacked_passed,
-                    'max_diff': f"{max_diff:.2e}",
-                    'max_batched_diff': f"{max_batched_diff:.2e}",
-                    'timestamp': timestamp
+                    "experiment_name": experiment_name,
+                    "step": step,
+                    "function_name": func_name,
+                    "num_traces": num_traces,
+                    "total_hypotheses": total_hypotheses,
+                    "cpu_time_ms": f"{cpu_time:.3f}",
+                    "gpu_per_trace_time_ms": f"{gpu_per_trace_time:.3f}",
+                    "gpu_batched_time_ms": f"{gpu_batched_time:.3f}",
+                    "per_trace_speedup": f"{per_trace_speedup:.2f}",
+                    "batched_speedup": f"{batched_speedup:.2f}",
+                    "batch_vs_pertrace_speedup": f"{batch_vs_pertrace:.2f}",
+                    "verification_percent_per_trace_passed": verification_percent_per_trace_passed,
+                    "verification_percent_stacked_passed": verification_percent_stacked_passed,
+                    "max_diff": f"{max_diff:.2e}",
+                    "max_batched_diff": f"{max_batched_diff:.2e}",
+                    "timestamp": timestamp
                 })
 
     print(f"Performance data logged to: {csv_path.absolute()}")
 
 
 def main():
-    """Main entry point."""
+    """Main entry point.
+
+    Parses command line arguments and runs GPU vs CPU performance analysis
+    on Monty experiment profiling data.
+    """
     parser = argparse.ArgumentParser(description="GPU vs CPU Monty Operations Test")
     parser.add_argument("--output-dir", required=True, help="Experiment output directory")
     parser.add_argument("--function", choices=["displacement", "knn_search", "distance",

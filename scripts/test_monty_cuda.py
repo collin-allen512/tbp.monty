@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
-"""
-Unified test script for all Monty CUDA kernels.
+"""Unified test script for all Monty CUDA kernels.
 Tests both hypothesis update and evidence calculation functions.
 """
 
-import torch
-import numpy as np
-import time
-import sys
 import os
+import sys
+import time
+
+import numpy as np
+import torch
 
 # Add gpu_kernels to path
-gpu_kernels_dir = os.path.join(os.path.dirname(__file__), '../gpu_kernels')
+gpu_kernels_dir = os.path.join(os.path.dirname(__file__), "../gpu_kernels")
 sys.path.insert(0, gpu_kernels_dir)
 
 def test_monty_cuda_import():
@@ -21,7 +21,7 @@ def test_monty_cuda_import():
     try:
         import monty_cuda
         print("✅ Successfully imported monty_cuda")
-        functions = [f for f in dir(monty_cuda) if not f.startswith('_')]
+        functions = [f for f in dir(monty_cuda) if not f.startswith("_")]
         print(f"Available functions: {functions}")
         return monty_cuda
     except ImportError as e:
@@ -136,12 +136,12 @@ def test_evidence_calculation_functions(monty_cuda):
             expected = torch.matmul(reference_poses, pose_vectors)
             diff = torch.max(torch.abs(result_gpu.cpu() - expected))
             print(f"    Max difference: {diff:.8f}")
-            results['pose_transformation'] = diff < 1e-5
+            results["pose_transformation"] = diff < 1e-5
         else:
             result = monty_cuda.pose_transformation(pose_vectors, reference_poses)
             expected = torch.matmul(reference_poses, pose_vectors)
             diff = torch.max(torch.abs(result - expected))
-            results['pose_transformation'] = diff < 1e-5
+            results["pose_transformation"] = diff < 1e-5
 
         print(f"    {'✅' if results['pose_transformation'] else '❌'} Pose transformation")
 
@@ -164,36 +164,36 @@ def test_evidence_calculation_functions(monty_cuda):
                      torch.all(result_gpu >= 0) and
                      torch.all(result_gpu < N_nodes))
             print(f"    Shape: {result_gpu.shape}, valid indices: {knn_ok}")
-            results['knn_search'] = knn_ok
+            results["knn_search"] = knn_ok
         else:
             result = monty_cuda.knn_search(graph_locations, query_locations, K)
             knn_ok = (result.shape == (N_queries, K) and
                      torch.all(result >= 0) and
                      torch.all(result < N_nodes))
-            results['knn_search'] = knn_ok
+            results["knn_search"] = knn_ok
 
         print(f"    {'✅' if results['knn_search'] else '❌'} KNN search")
 
-        # Test final aggregation
-        print("  Testing final_aggregation...")
+        # Test radius evidence max
+        print("  Testing radius_evidence_max...")
         N = 25
         K = 4
         evidence_matrix = torch.randn(N, K).float()
 
         if torch.cuda.is_available():
             evidence_matrix_gpu = evidence_matrix.cuda()
-            result_gpu = monty_cuda.final_aggregation(evidence_matrix_gpu)
+            result_gpu = monty_cuda.radius_evidence_max(evidence_matrix_gpu)
             expected = torch.max(evidence_matrix, dim=1).values
             diff = torch.max(torch.abs(result_gpu.cpu() - expected))
             print(f"    Max difference: {diff:.8f}")
-            results['final_aggregation'] = diff < 1e-6
+            results["radius_evidence_max"] = diff < 1e-6
         else:
-            result = monty_cuda.final_aggregation(evidence_matrix)
+            result = monty_cuda.radius_evidence_max(evidence_matrix)
             expected = torch.max(evidence_matrix, dim=1).values
             diff = torch.max(torch.abs(result - expected))
-            results['final_aggregation'] = diff < 1e-6
+            results["radius_evidence_max"] = diff < 1e-6
 
-        print(f"    {'✅' if results['final_aggregation'] else '❌'} Final aggregation")
+        print(f"    {'✅' if results['radius_evidence_max'] else '❌'} Radius evidence max")
 
         # Test custom distance calculation
         print("  Testing custom_distance...")
@@ -205,30 +205,30 @@ def test_evidence_calculation_functions(monty_cuda):
             # Normalize pose normals
             pose_normals = pose_normals / torch.norm(pose_normals, dim=1, keepdim=True)
             max_abs_curvature = 0.5
-            
+
             if torch.cuda.is_available():
                 node_locs_gpu = node_locs.cuda()
                 query_locs_gpu = query_locs.cuda()
                 pose_normals_gpu = pose_normals.cuda()
-                
+
                 result_gpu = monty_cuda.custom_distance(node_locs_gpu, query_locs_gpu, pose_normals_gpu, max_abs_curvature)
-                
+
                 # Test CPU vs GPU consistency
                 cpu_result = monty_cuda.custom_distance(node_locs, query_locs, pose_normals, max_abs_curvature)
                 diff = torch.max(torch.abs(cpu_result - result_gpu.cpu()))
-                
+
                 print(f"    Result shape: {result_gpu.shape}")
                 print(f"    CPU vs GPU max diff: {diff:.6f}")
-                results['custom_distance'] = result_gpu.shape == (N, M) and diff < 1e-5
+                results["custom_distance"] = result_gpu.shape == (N, M) and diff < 1e-5
             else:
                 result = monty_cuda.custom_distance(node_locs, query_locs, pose_normals, max_abs_curvature)
-                results['custom_distance'] = result.shape == (N, M)
-                
+                results["custom_distance"] = result.shape == (N, M)
+
             print(f"    {'✅' if results['custom_distance'] else '❌'} Custom distance test")
         except Exception as e:
             print(f"    ❌ Custom distance test failed: {e}")
-            results['custom_distance'] = False
-        
+            results["custom_distance"] = False
+
         # Test angle calculation
         print("  Testing angle_calculation...")
         try:
@@ -238,35 +238,35 @@ def test_evidence_calculation_functions(monty_cuda):
             # Normalize vectors
             node_vectors = node_vectors / torch.norm(node_vectors, dim=2, keepdim=True)
             query_vectors = query_vectors / torch.norm(query_vectors, dim=1, keepdim=True)
-            
+
             if torch.cuda.is_available():
                 node_vectors_gpu = node_vectors.cuda()
                 query_vectors_gpu = query_vectors.cuda()
-                
+
                 result_gpu = monty_cuda.angle_calculation(node_vectors_gpu, query_vectors_gpu)
-                
+
                 # Test CPU vs GPU consistency
                 cpu_result = monty_cuda.angle_calculation(node_vectors, query_vectors)
                 diff = torch.max(torch.abs(cpu_result - result_gpu.cpu()))
-                
+
                 # Verify results are in valid range [0, π]
                 in_range = torch.all(result_gpu >= 0) and torch.all(result_gpu <= np.pi)
-                
+
                 print(f"    Result shape: {result_gpu.shape}")
                 print(f"    Result range: {result_gpu.min():.3f} to {result_gpu.max():.3f}")
                 print(f"    Expected range: 0 to π ({np.pi:.3f})")
                 print(f"    CPU vs GPU max diff: {diff:.6f}")
-                results['angle_calculation'] = result_gpu.shape == (N, M) and in_range and diff < 1e-5
+                results["angle_calculation"] = result_gpu.shape == (N, M) and in_range and diff < 1e-5
             else:
                 result = monty_cuda.angle_calculation(node_vectors, query_vectors)
                 in_range = torch.all(result >= 0) and torch.all(result <= np.pi)
-                results['angle_calculation'] = result.shape == (N, M) and in_range
-                
+                results["angle_calculation"] = result.shape == (N, M) and in_range
+
             print(f"    {'✅' if results['angle_calculation'] else '❌'} Angle calculation test")
         except Exception as e:
             print(f"    ❌ Angle calculation test failed: {e}")
-            results['angle_calculation'] = False
-        
+            results["angle_calculation"] = False
+
         # Test pose evidence calculation
         print("  Testing pose_evidence...")
         try:
@@ -276,30 +276,30 @@ def test_evidence_calculation_functions(monty_cuda):
             use_cd = torch.randint(0, 2, (N, M), dtype=torch.int32)  # Random boolean as int
             pn_weight = 0.8
             cd1_weight = 0.2
-            
+
             if torch.cuda.is_available():
                 pn_angles_gpu = pn_angles.cuda()
                 cd1_angles_gpu = cd1_angles.cuda()
                 use_cd_gpu = use_cd.cuda()
-                
+
                 result_gpu = monty_cuda.pose_evidence(pn_angles_gpu, cd1_angles_gpu, use_cd_gpu, pn_weight, cd1_weight)
-                
+
                 # Test CPU vs GPU consistency
                 cpu_result = monty_cuda.pose_evidence(pn_angles, cd1_angles, use_cd, pn_weight, cd1_weight)
                 diff = torch.max(torch.abs(cpu_result - result_gpu.cpu()))
-                
+
                 print(f"    Result shape: {result_gpu.shape}")
                 print(f"    Result range: {result_gpu.min():.3f} to {result_gpu.max():.3f}")
                 print(f"    CPU vs GPU max diff: {diff:.6f}")
-                results['pose_evidence'] = result_gpu.shape == (N, M) and diff < 1e-5
+                results["pose_evidence"] = result_gpu.shape == (N, M) and diff < 1e-5
             else:
                 result = monty_cuda.pose_evidence(pn_angles, cd1_angles, use_cd, pn_weight, cd1_weight)
-                results['pose_evidence'] = result.shape == (N, M)
-                
+                results["pose_evidence"] = result.shape == (N, M)
+
             print(f"    {'✅' if results['pose_evidence'] else '❌'} Pose evidence test")
         except Exception as e:
             print(f"    ❌ Pose evidence test failed: {e}")
-            results['pose_evidence'] = False
+            results["pose_evidence"] = False
 
         return all(results.values())
 

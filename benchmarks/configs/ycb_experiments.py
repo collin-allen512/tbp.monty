@@ -253,7 +253,11 @@ base_config_10distinctobj_dist_agent = dict(
     experiment_class=MontyObjectRecognitionExperiment,
     experiment_args=EvalExperimentArgs(
         model_name_or_path=model_path_10distinctobj,
-        n_eval_epochs=len(test_rotations_all),
+        # n_eval_epochs=1,
+        # # n_eval_epochs=len(test_rotations_all),
+        # max_total_steps=4,  # x4 max_eval_steps for surface-policy, x2.5 for
+        # max_train_steps=4,
+        # # max_exploratory_steps=20,
     ),
     logging_config=ParallelEvidenceLMLoggingConfig(
         wandb_group="benchmark_experiments",
@@ -264,6 +268,7 @@ base_config_10distinctobj_dist_agent = dict(
     monty_config=PatchAndViewSOTAMontyConfig(
         learning_module_configs=lower_max_nneighbors_1lm_config,
         monty_args=MontyArgs(min_eval_steps=min_eval_steps),
+        # monty_args=MontyArgs(min_eval_steps=1, num_exploratory_steps=1),
     ),
     dataset_class=ED.EnvironmentDataset,
     dataset_args=PatchViewFinderMountHabitatDatasetArgs(),
@@ -555,8 +560,16 @@ surf_agent_unsupervised_10simobj.update(
 base_77obj_dist_agent = copy.deepcopy(base_config_10distinctobj_dist_agent)
 base_77obj_dist_agent.update(
     experiment_args=EvalExperimentArgs(
+        # max_train_steps= 10,
+        # max_eval_steps= 10,
+        # max_total_steps= 4 * (10 + 10),  # Total number of
+        # # episode steps that can be taken before timing out, regardless of e.g. whether LMs
+        # # receive sensory information and therefore perform a true matching step (due to
+        # # e.g. being off the object)
+        # n_train_epochs= 1,
+        # n_eval_epochs= 1,
         model_name_or_path=model_path_1lm_77obj,
-        n_eval_epochs=len(test_rotations_3),
+        # n_eval_epochs=len(test_rotations_3),
     ),
     eval_dataloader_args=EnvironmentDataloaderPerObjectArgs(
         object_names=get_object_names_by_idx(
@@ -603,7 +616,11 @@ randrot_noise_77obj_dist_agent = copy.deepcopy(randrot_noise_10distinctobj_dist_
 randrot_noise_77obj_dist_agent.update(
     experiment_args=EvalExperimentArgs(
         model_name_or_path=model_path_1lm_77obj,
-        n_eval_epochs=3,
+        # # n_eval_epochs=3,
+        # n_eval_epochs=1,
+        # # n_eval_epochs=len(test_rotations_all),
+        # max_total_steps=20,  # x4 max_eval_steps for surface-policy, x2.5 for
+        # max_train_steps=20,
     ),
     eval_dataloader_args=EnvironmentDataloaderPerObjectArgs(
         object_names=get_object_names_by_idx(
@@ -619,9 +636,17 @@ randrot_noise_77obj_5lms_dist_agent = copy.deepcopy(
 )
 randrot_noise_77obj_5lms_dist_agent.update(
     experiment_args=EvalExperimentArgs(
+        # max_train_steps= 10,
+        # max_eval_steps= 10,
+        # max_total_steps= 4 * (10 + 10),  # Total number of
+        # # episode steps that can be taken before timing out, regardless of e.g. whether LMs
+        # # receive sensory information and therefore perform a true matching step (due to
+        # # e.g. being off the object)
+        # n_train_epochs= 1,
+        # n_eval_epochs= 1,
         model_name_or_path=model_path_5lms_77obj,
-        n_eval_epochs=1,
-        min_lms_match=3,
+        # n_eval_epochs=1,
+        # min_lms_match=3,
     ),
     eval_dataloader_args=EnvironmentDataloaderPerObjectArgs(
         object_names=get_object_names_by_idx(

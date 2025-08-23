@@ -273,6 +273,7 @@ class ProfiledHypothesesDisplacer(DefaultHypothesesDisplacer):
                 trace["intermediates"]["new_evidence"] = new_evidence.copy()
                 trace["intermediates"]["hyp_ids_to_test"] = hyp_ids_to_test.copy()
             self.computation_traces.append(trace)
+            print("trace lm ", trace["lm_id"])
             print(f"saving a trace! {len(self.computation_traces)} at step {current_step}")
 
         return ChannelHypotheses(
@@ -494,14 +495,14 @@ class ProfiledHypothesesDisplacer(DefaultHypothesesDisplacer):
                     "timing": time_feat_ev,
                 }
 
-        # Profile final aggregation
+        # Profile radius evidence max
         start_final = time.perf_counter()
         location_evidence = np.max(radius_evidence, axis=1)
         time_final = time.perf_counter() - start_final
-        self.timing_data["final_aggregation"].append(time_final)
+        self.timing_data["radius_evidence_max"].append(time_final)
 
         if self.save_computation_trace:
-            evidence_intermediates["final_aggregation"] = {
+            evidence_intermediates["radius_evidence_max"] = {
                 "inputs": {
                     "radius_evidence": radius_evidence.copy(),
                 },

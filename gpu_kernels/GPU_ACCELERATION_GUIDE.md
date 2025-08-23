@@ -96,7 +96,7 @@ The unified `monty_cuda` module provides:
 - `custom_distance(...)` - Curvature-modulated distances
 - `angle_calculation(...)` - Compute pose angles
 - `pose_evidence(...)` - Convert angles to evidence
-- `final_aggregation(evidence_matrix)` - Max reduction
+- `radius_evidence_max(evidence_matrix)` - Max reduction
 
 ### Implementation Structure
 

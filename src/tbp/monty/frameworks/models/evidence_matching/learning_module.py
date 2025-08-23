@@ -273,7 +273,7 @@ class EvidenceGraphLM(GraphLM):
         # Add reference to learning module for step tracking
         self.hypotheses_updater.learning_module = self
         # Also pass to displacer if it exists
-        if hasattr(self.hypotheses_updater, 'hypotheses_displacer'):
+        if hasattr(self.hypotheses_updater, "hypotheses_displacer"):
             self.hypotheses_updater.hypotheses_displacer.learning_module = self
 
         # Add explicit step counter for more robust tracking
@@ -746,13 +746,13 @@ class EvidenceGraphLM(GraphLM):
         self.current_step += 1
 
         # Store step timing for GPU comparison if profiled hypotheses updater
-        if hasattr(self.hypotheses_updater, 'step_timings'):
+        if hasattr(self.hypotheses_updater, "step_timings"):
             self.hypotheses_updater.step_timings.append({
-                'step': self.current_step,
-                'total_time': step_total_time,
-                'num_objects': len(self.get_all_known_object_ids()),
-                'multithreaded': self.use_multithreading,
-                'timestamp': time.time()
+                "step": self.current_step,
+                "total_time": step_total_time,
+                "num_objects": len(self.get_all_known_object_ids()),
+                "multithreaded": self.use_multithreading,
+                "timestamp": time.time()
             })
         # NOTE: would not need to do this if we are still voting
         # Call this update in the step method?
